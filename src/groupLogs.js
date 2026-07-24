@@ -13,6 +13,7 @@
 //     it can never hit the rate limit or need a second bot token
 
 const config = require('./config')
+const crypto = require('crypto')
 const logger = require('./logger')
 const db = require('./db')
 const vrc = require('./vrchatApi')
@@ -26,53 +27,60 @@ const SEEN_CAP = 600
 const MAX_POSTS_PER_CYCLE = 40
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000
 
+// No emojis by design: custom emojis can be added later through the
+// Discord developer portal and referenced as <:name:id> if wanted.
 const CATEGORIES = {
-  warn: { color: 0xffcc00, icon: '\u26a0\ufe0f' },
-  kick: { color: 0xff8800, icon: '\ud83e\udd7e' },
-  ban: { color: 0xe01b24, icon: '\ud83d\udd28' },
-  unban: { color: 0x33d17a, icon: '\ud83d\udd4a\ufe0f' },
-  join: { color: 0x2bcf5c, icon: '\ud83d\udce5' },
-  leave: { color: 0x9a9996, icon: '\ud83d\udce4' },
-  join_request: { color: 0x62a0ea, icon: '\ud83d\udce8' },
-  invite: { color: 0xb5835a, icon: '\u2709\ufe0f' },
-  role: { color: 0x8143e6, icon: '\ud83c\udfad' },
-  post: { color: 0x26a269, icon: '\ud83d\udccc' },
-  instance: { color: 0x1c9fd4, icon: '\ud83c\udf10' },
-  group: { color: 0xdb7093, icon: '\ud83c\udfdb\ufe0f' },
-  default: { color: 0x888888, icon: '\ud83d\udccb' },
+  warn: { color: 0xffcc00 },
+  kick: { color: 0xff8800 },
+  ban: { color: 0xff4444 },
+  unban: { color: 0x44ff44 },
+  join: { color: 0x2bcf5c },
+  leave: { color: 0x9a9996 },
+  join_request: { color: 0x62a0ea },
+  invite: { color: 0xb5835a },
+  role: { color: 0x8143e6 },
+  post: { color: 0x26a269 },
+  instance: { color: 0x1c9fd4 },
+  group: { color: 0xdb7093 },
+  default: { color: 0x888888 },
 }
+
+// Warn, kick, and ban logs get the moderation controls (reason menu and
+// the Request Ban button), matching the Legends moderation bot.
+const ACTIONABLE_CATEGORIES = new Set(['warn', 'kick', 'ban'])
 
 // Known audit event types. Anything not listed is classified by the prefix
 // heuristics below and routed to the default channel when unmatched.
+// Labels are short: the embed title becomes "VRChat Group <label>".
 const EVENTS = {
-  'group.instance.warn': { category: 'warn', label: 'Member Warned' },
-  'group.instance.kick': { category: 'kick', label: 'Kicked From Instance' },
-  'group.member.kick': { category: 'kick', label: 'Member Kicked' },
-  'group.member.ban': { category: 'ban', label: 'Member Banned' },
-  'group.member.unban': { category: 'unban', label: 'Member Unbanned' },
-  'group.member.join': { category: 'join', label: 'Member Joined' },
-  'group.member.leave': { category: 'leave', label: 'Member Left' },
-  'group.member.remove': { category: 'leave', label: 'Member Removed' },
-  'group.member.role.assign': { category: 'role', label: 'Member Role Assigned' },
-  'group.member.role.unassign': { category: 'role', label: 'Member Role Removed' },
+  'group.instance.warn': { category: 'warn', label: 'Warning' },
+  'group.instance.kick': { category: 'kick', label: 'Kick' },
+  'group.member.kick': { category: 'kick', label: 'Kick' },
+  'group.member.ban': { category: 'ban', label: 'Ban' },
+  'group.member.unban': { category: 'unban', label: 'Unban' },
+  'group.member.join': { category: 'join', label: 'Join' },
+  'group.member.leave': { category: 'leave', label: 'Leave' },
+  'group.member.remove': { category: 'leave', label: 'Removal' },
+  'group.member.role.assign': { category: 'role', label: 'Role Assigned' },
+  'group.member.role.unassign': { category: 'role', label: 'Role Removed' },
   'group.role.create': { category: 'role', label: 'Role Created' },
   'group.role.update': { category: 'role', label: 'Role Updated' },
   'group.role.delete': { category: 'role', label: 'Role Deleted' },
   'group.request.create': { category: 'join_request', label: 'Join Request' },
-  'group.request.deny': { category: 'join_request', label: 'Join Request Denied' },
-  'group.request.reject': { category: 'join_request', label: 'Join Request Rejected' },
-  'group.request.block': { category: 'join_request', label: 'Join Request Blocked' },
-  'group.invite.create': { category: 'invite', label: 'Invite Sent' },
+  'group.request.deny': { category: 'join_request', label: 'Request Denied' },
+  'group.request.reject': { category: 'join_request', label: 'Request Rejected' },
+  'group.request.block': { category: 'join_request', label: 'Request Blocked' },
+  'group.invite.create': { category: 'invite', label: 'Invite' },
   'group.invite.delete': { category: 'invite', label: 'Invite Withdrawn' },
-  'group.post.create': { category: 'post', label: 'Post Created' },
+  'group.post.create': { category: 'post', label: 'Post' },
   'group.post.delete': { category: 'post', label: 'Post Deleted' },
-  'group.announcement.create': { category: 'post', label: 'Announcement Created' },
+  'group.announcement.create': { category: 'post', label: 'Announcement' },
   'group.announcement.delete': { category: 'post', label: 'Announcement Deleted' },
   'group.instance.create': { category: 'instance', label: 'Instance Opened' },
   'group.instance.close': { category: 'instance', label: 'Instance Closed' },
   'group.instance.delete': { category: 'instance', label: 'Instance Deleted' },
-  'group.update': { category: 'group', label: 'Group Settings Updated' },
-  'group.member.update': { category: 'default', label: 'Member Profile Updated' },
+  'group.update': { category: 'group', label: 'Settings Update' },
+  'group.member.update': { category: 'default', label: 'Member Update' },
 }
 
 // VRChat has shipped alternate spellings for some entries (plurals, missing
@@ -136,11 +144,11 @@ function getTarget(entry) {
 
 function userLine(userId, username) {
   const id = String(userId || '')
-  const name = String(username || '') || id || 'unknown'
-  if (!/^usr_/i.test(id)) return name
-  let out = `[${name}](https://vrchat.com/home/user/${id})`
+  const name = String(username || '')
+  if (!/^usr_/i.test(id)) return name || id || 'unknown'
+  let out = name ? `${name} (\`${id}\`)` : `\`${id}\``
   const link = db.getLinkByVrchat(id)
-  if (link) out += ` (linked: <@${link.discord_id}>)`
+  if (link) out += ` | <@${link.discord_id}>`
   return out
 }
 
@@ -161,6 +169,61 @@ function formatDataPayload(data) {
   return lines.length ? lines.join('\n').slice(0, 1024) : null
 }
 
+// ---------------------------------------------------------------
+// moderation controls (reason menu, Request Ban, Custom Reason)
+// ---------------------------------------------------------------
+
+const MODERATION_REASONS = [
+  'Spamming',
+  'Mic Abuse',
+  'Inappropriate Avatar(s)',
+  'Harassment',
+  'Disturbing the Peace',
+  'Pedophilia',
+  'Sexual Content',
+  'Hate Speech',
+  'Height Exploit',
+  'Under Age',
+  'Homophobia/Slurs',
+  'Racism',
+  'Crasher/Client User',
+  'Modded/Malicious Client',
+  'Drama',
+  'Trolling',
+  'Doxxing/Personal Info',
+  'Threats/Violence',
+  'Impersonating Staff',
+  'Ban Evasion/Alt Account',
+  'Scamming/Phishing',
+  'NSFW in Public Instance',
+  'Gore/Shock Content',
+  'Earrape/Loud Audio',
+  'Rule Breaking (Other)',
+]
+
+function buildModComponents(logId) {
+  return [
+    {
+      type: 1,
+      components: [{
+        type: 3,
+        custom_id: `mod_reason:${logId}`,
+        placeholder: 'Select a reason...',
+        min_values: 1,
+        max_values: 1,
+        options: MODERATION_REASONS.slice(0, 25).map((reason) => ({ label: reason, value: reason })),
+      }],
+    },
+    {
+      type: 1,
+      components: [
+        { type: 2, style: 4, custom_id: `mod_ban:${logId}`, label: 'Request Ban' },
+        { type: 2, style: 2, custom_id: `mod_custom:${logId}`, label: 'Custom Reason' },
+      ],
+    },
+  ]
+}
+
 function buildEmbed(entry) {
   const { eventType, category, label } = classify(entry.eventType)
   const meta = CATEGORIES[category] || CATEGORIES.default
@@ -168,27 +231,51 @@ function buildEmbed(entry) {
   const ms = createdAt.getTime()
   const unix = Math.floor((Number.isFinite(ms) ? ms : Date.now()) / 1000)
   const target = getTarget(entry)
+  const logId = crypto.randomBytes(16).toString('hex')
 
-  const fields = []
+  const fields = [
+    { name: 'Event', value: label, inline: true },
+    { name: 'Event Type', value: `\`${eventType}\``, inline: true },
+  ]
   if (entry.actorDisplayName || entry.actorId) {
     fields.push({ name: 'Actor', value: userLine(entry.actorId, entry.actorDisplayName).slice(0, 1024), inline: false })
   }
   // Skip the target when it is the actor acting on themselves (joins, leaves).
   if ((target.userId || target.username) && target.userId !== entry.actorId) {
-    fields.push({ name: 'Target', value: userLine(target.userId, target.username).slice(0, 1024), inline: false })
+    fields.push({ name: 'Target user', value: userLine(target.userId, target.username).slice(0, 1024), inline: false })
+  }
+  if (entry.description) {
+    fields.push({ name: 'Description', value: String(entry.description).slice(0, 1024), inline: false })
   }
   const details = formatDataPayload(entry.data)
   if (details) fields.push({ name: 'Details', value: details, inline: false })
-  fields.push({ name: 'When', value: `<t:${unix}:F> (<t:${unix}:R>)`, inline: false })
+  if (entry.id) {
+    fields.push({ name: 'VRChat Audit ID', value: `\`${entry.id}\``, inline: true })
+  }
+  fields.push({ name: 'Occurred', value: `<t:${unix}:F>`, inline: true })
+
+  const actionable = ACTIONABLE_CATEGORIES.has(category) && Boolean(target.userId)
 
   return {
     category,
+    logId,
+    actionable,
+    record: {
+      logId,
+      auditId: entry.id || '',
+      eventType,
+      targetId: target.userId || '',
+      targetName: target.username || '',
+      actorName: entry.actorDisplayName || entry.actorId || '',
+      location: typeof entry.data?.location === 'string' ? entry.data.location : '',
+      occurredAt: createdAt.toISOString(),
+    },
+    components: actionable ? buildModComponents(logId) : undefined,
     embed: {
-      title: `${meta.icon} ${label}`,
+      title: `VRChat Group ${label}`,
       color: meta.color,
-      description: entry.description ? String(entry.description).slice(0, 2048) : undefined,
       fields: fields.slice(0, 25),
-      footer: { text: `${eventType}${entry.id ? ` | ${entry.id}` : ''}` },
+      footer: { text: `Log ID: ${logId}` },
       timestamp: createdAt.toISOString(),
     },
   }
@@ -208,15 +295,15 @@ function anyChannelConfigured() {
   return Object.values(config.groupLogs.channels).some((id) => id)
 }
 
-async function sendToChannel(channelId, embed) {
-  if (!clientRef || !channelId) return
+async function sendToChannel(channelId, payload) {
+  if (!clientRef || !channelId) return null
   const channel = clientRef.channels.cache.get(channelId)
     || await clientRef.channels.fetch(channelId).catch(() => null)
   if (!channel || !channel.isTextBased?.()) {
     log.warn(`Group log channel ${channelId} is missing or not a text channel`)
-    return
+    return null
   }
-  await channel.send({ embeds: [embed], allowedMentions: { parse: [] } })
+  return channel.send({ ...payload, allowedMentions: { parse: [] } })
 }
 
 async function poll() {
@@ -247,12 +334,15 @@ async function poll() {
       if (seen.has(entry.id)) continue
       if (posted >= MAX_POSTS_PER_CYCLE) break
 
-      const { category, embed } = buildEmbed(entry)
+      const { category, embed, components, actionable, record } = buildEmbed(entry)
       const channelId = channelFor(category)
       if (channelId) {
         try {
-          await sendToChannel(channelId, embed)
+          const message = await sendToChannel(channelId, { embeds: [embed], components })
           posted += 1
+          if (actionable && message) {
+            db.saveModerationLog({ ...record, channelId: message.channelId, messageId: message.id })
+          }
         } catch (err) {
           log.warn(`Failed to post ${entry.eventType} to ${channelId}:`, err.message)
         }

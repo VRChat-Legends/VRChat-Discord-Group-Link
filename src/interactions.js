@@ -10,8 +10,11 @@ const {
   ButtonStyle,
   ChannelType,
   MessageFlags,
+  ModalBuilder,
   PermissionFlagsBits,
   StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js')
 const config = require('./config')
 const db = require('./db')
@@ -705,6 +708,132 @@ async function handleSetupLogChannels(interaction) {
 }
 
 // ---------------------------------------------------------------
+// moderation controls on group log posts (reason menu, Request Ban)
+// ---------------------------------------------------------------
+
+function embedWithField(rawEmbed, name, value) {
+  const fields = (rawEmbed.fields || []).filter((f) => f.name !== name)
+  fields.push({ name, value, inline: false })
+  return { ...rawEmbed, fields: fields.slice(0, 25) }
+}
+
+function modLogId(interaction) {
+  return String(interaction.customId).split(':')[1] || ''
+}
+
+async function handleModReason(interaction) {
+  const logId = modLogId(interaction)
+  const reason = String(interaction.values?.[0] || '').slice(0, 100)
+  if (!reason) return
+  if (db.getModerationLog(logId)) db.setModerationReason(logId, reason, interaction.user.id)
+  const raw = interaction.message.embeds[0]?.toJSON?.() || {}
+  await interaction.update({
+    embeds: [embedWithField(raw, 'Reason', `${reason} (set by <@${interaction.user.id}>)`)],
+  })
+  log.info(`Moderation reason set on ${logId}: ${reason} by ${interaction.user.tag}`)
+}
+
+async function handleModCustomButton(interaction) {
+  const logId = modLogId(interaction)
+  const modal = new ModalBuilder()
+    .setCustomId(`mod_custom_modal:${logId}`)
+    .setTitle('Custom reason')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('reason')
+          .setLabel('Reason')
+          .setPlaceholder('Write the reason for this action...')
+          .setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(300)
+          .setRequired(true)
+      )
+    )
+  await interaction.showModal(modal)
+}
+
+async function handleModCustomModal(interaction) {
+  const logId = modLogId(interaction)
+  const reason = String(interaction.fields.getTextInputValue('reason') || '').trim().slice(0, 300)
+  if (!reason) return
+  if (db.getModerationLog(logId)) db.setModerationReason(logId, reason, interaction.user.id)
+  if (interaction.isFromMessage()) {
+    const raw = interaction.message.embeds[0]?.toJSON?.() || {}
+    await interaction.update({
+      embeds: [embedWithField(raw, 'Reason', `${reason} (set by <@${interaction.user.id}>)`)],
+    })
+  } else {
+    await interaction.reply({ content: `Reason saved: ${reason}`, flags: MessageFlags.Ephemeral })
+  }
+  log.info(`Custom moderation reason set on ${logId} by ${interaction.user.tag}`)
+}
+
+function banRequestTemplate(rec, requester) {
+  return [
+    '```',
+    'ACTION: BAN (PERMANENT)',
+    `USER ID: ${rec.target_id}`,
+    `REASON: ${rec.reason || ''}`,
+    'RULE VIOLATED:',
+    `LOCATION (World/Instance): ${rec.location || ''}`,
+    `TIME (Local/UTC): ${rec.occurred_at || ''}`,
+    'EVIDENCE (clip/screenshot/witness):',
+    `STAFF MEMBER: ${requester}`,
+    'ESCALATED TO ADMIN: Yes/No',
+    'NOTES:',
+    '```',
+  ].join('\n')
+}
+
+async function handleModBan(interaction) {
+  const logId = modLogId(interaction)
+  const rec = db.getModerationLog(logId)
+  if (!rec) {
+    await interaction.reply({
+      content: 'The record behind this log is gone (posted before the last database reset). Handle it manually.',
+      flags: MessageFlags.Ephemeral,
+    })
+    return
+  }
+
+  db.setModerationBanRequested(logId, interaction.user.id)
+
+  // Mark the original log message first.
+  const raw = interaction.message.embeds[0]?.toJSON?.() || {}
+  await interaction.update({
+    embeds: [embedWithField(raw, 'Ban Requested', `By <@${interaction.user.id}> <t:${Math.floor(Date.now() / 1000)}:f>`)],
+  })
+
+  // Then post the request where admins will see it.
+  const targetLine = rec.target_name ? `${rec.target_name} (\`${rec.target_id}\`)` : `\`${rec.target_id}\``
+  const requestEmbed = {
+    title: 'Ban Requested',
+    color: 0xff4444,
+    fields: [
+      { name: 'Target user', value: targetLine.slice(0, 1024), inline: false },
+      { name: 'Reason', value: rec.reason || 'Not set', inline: true },
+      { name: 'Requested by', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'From event', value: `\`${rec.event_type}\``, inline: true },
+      { name: 'Moderation template', value: banRequestTemplate(rec, interaction.user.tag).slice(0, 1024), inline: false },
+    ],
+    footer: { text: `Log ID: ${logId}` },
+    timestamp: new Date().toISOString(),
+  }
+
+  const channelId = config.logs.alertChannelId || rec.channel_id || interaction.channelId
+  try {
+    const channel = interaction.client.channels.cache.get(channelId)
+      || await interaction.client.channels.fetch(channelId).catch(() => null)
+    if (channel?.isTextBased?.()) {
+      await channel.send({ embeds: [requestEmbed], allowedMentions: { parse: [] } })
+    }
+  } catch (err) {
+    log.warn('ban request post failed:', err.message)
+  }
+  log.info(`Ban requested on ${logId} (${rec.target_id}) by ${interaction.user.tag}`)
+}
+
+// ---------------------------------------------------------------
 // router
 // ---------------------------------------------------------------
 
@@ -717,11 +846,19 @@ async function handleInteraction(interaction) {
   if (interaction.isButton()) {
     if (interaction.customId === 'link_verify') await handleLinkVerify(interaction)
     else if (interaction.customId === 'link_cancel') await handleLinkCancel(interaction)
+    else if (interaction.customId.startsWith('mod_ban:')) await handleModBan(interaction)
+    else if (interaction.customId.startsWith('mod_custom:')) await handleModCustomButton(interaction)
     return
   }
 
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === 'link_pick') await handleLinkPick(interaction)
+    else if (interaction.customId.startsWith('mod_reason:')) await handleModReason(interaction)
+    return
+  }
+
+  if (interaction.isModalSubmit?.()) {
+    if (interaction.customId.startsWith('mod_custom_modal:')) await handleModCustomModal(interaction)
     return
   }
 

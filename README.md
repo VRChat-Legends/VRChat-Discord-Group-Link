@@ -12,6 +12,7 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 - **Stat tracker channels**: locked voice channels that display live numbers, like `Group Members: 1234`.
 - **Log channels**: optional Discord channels that receive embeds for links, unlinks, every role change the bot makes, and alerts. `/setup-log-channels` builds the whole set in one go and fills `config.yml` for you.
 - **Group audit log feed**: the bot watches your VRChat group's audit log and posts an embed for every event: warns, kicks, bans, unbans, joins, leaves, join requests, invites, role changes, posts, instances, and settings changes. Each category can go to its own channel (set in `config.yml`), with a default channel catching the rest. Linked members show up with their Discord account right in the embed.
+- **Moderation controls**: warn, kick, and ban logs come with a 25 option reason menu, a Custom Reason button (type your own), and a Request Ban button that posts a pre-filled moderation template to the alert channel. No emojis are used, so you can add your own custom ones later.
 - **Member lookup**: `/get-member-info` builds an embed with everything the API knows about a user.
 - **Rate limit safe**: every VRChat API call is globally paced (default 1 per second, 30 per minute) and big member lists sync in small rotating batches. The bot will never hammer the VRChat API.
 

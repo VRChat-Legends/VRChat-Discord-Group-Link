@@ -77,6 +77,24 @@ function getDb() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL DEFAULT ''
     );
+
+    -- Moderation records behind the reason menu / Request Ban controls
+    CREATE TABLE IF NOT EXISTS moderation_logs (
+      log_id TEXT PRIMARY KEY,
+      audit_id TEXT NOT NULL DEFAULT '',
+      event_type TEXT NOT NULL DEFAULT '',
+      target_id TEXT NOT NULL DEFAULT '',
+      target_name TEXT NOT NULL DEFAULT '',
+      actor_name TEXT NOT NULL DEFAULT '',
+      location TEXT NOT NULL DEFAULT '',
+      occurred_at TEXT NOT NULL DEFAULT '',
+      channel_id TEXT NOT NULL DEFAULT '',
+      message_id TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      reason_by TEXT NOT NULL DEFAULT '',
+      ban_requested_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
   `)
   return db
 }
@@ -235,6 +253,39 @@ function setKv(key, value) {
     .run(String(key), JSON.stringify(value))
 }
 
+// ---------------------------------------------------------------
+// moderation logs
+// ---------------------------------------------------------------
+
+function saveModerationLog({ logId, auditId, eventType, targetId, targetName, actorName, location, occurredAt, channelId, messageId }) {
+  getDb()
+    .prepare(`INSERT OR REPLACE INTO moderation_logs
+      (log_id, audit_id, event_type, target_id, target_name, actor_name, location, occurred_at, channel_id, message_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(
+      String(logId), String(auditId || ''), String(eventType || ''), String(targetId || ''),
+      String(targetName || ''), String(actorName || ''), String(location || ''),
+      String(occurredAt || ''), String(channelId || ''), String(messageId || ''),
+      new Date().toISOString()
+    )
+}
+
+function getModerationLog(logId) {
+  return getDb().prepare('SELECT * FROM moderation_logs WHERE log_id = ?').get(String(logId)) || null
+}
+
+function setModerationReason(logId, reason, byDiscordId) {
+  getDb()
+    .prepare('UPDATE moderation_logs SET reason = ?, reason_by = ? WHERE log_id = ?')
+    .run(String(reason), String(byDiscordId), String(logId))
+}
+
+function setModerationBanRequested(logId, byDiscordId) {
+  getDb()
+    .prepare('UPDATE moderation_logs SET ban_requested_by = ? WHERE log_id = ?')
+    .run(String(byDiscordId), String(logId))
+}
+
 module.exports = {
   getDb,
   getLinkByDiscord,
@@ -259,4 +310,8 @@ module.exports = {
   getMiscRoles,
   getKv,
   setKv,
+  saveModerationLog,
+  getModerationLog,
+  setModerationReason,
+  setModerationBanRequested,
 }
