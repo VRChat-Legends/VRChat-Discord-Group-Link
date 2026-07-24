@@ -1,0 +1,23 @@
+# =============================================================
+# VRChat-Discord Group Link - config.yml
+# Non-secret settings live here. Secrets stay in .env.
+# Restart the bot after editing.
+# =============================================================
+
+# Log channels: the bot posts embeds about what it does. Right click a
+# channel with Developer Mode on and Copy Channel ID. Leave empty to
+# disable that log.
+logs:
+  # Link and unlink events (who linked to which VRChat account)
+  link_channel_id: ""
+  # Role changes the bot made (both Discord and VRChat side)
+  role_channel_id: ""
+  # Errors and warnings worth a human look (VRChat auth failures, etc.)
+  alert_channel_id: ""
+
+# Rich presence: the bot stays Online and rotates through these every
+# 5 minutes. type: custom | watching | listening | playing
+presence:
+  - { type: custom, text: "/link to connect your VRChat" }
+  - { type: watching, text: "the group | /link" }
+  - { type: listening, text: "/ping" }

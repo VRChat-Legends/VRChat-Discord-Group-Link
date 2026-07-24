@@ -1,10 +1,13 @@
 'use strict'
 
-// Configuration for VRChat-Discord Group Link. Everything comes from .env
-// next to package.json. Copied and trimmed from the VRChat Legends API
-// backend config, adapted for a standalone bot with no website.
+// Configuration for VRChat-Discord Group Link. Secrets come from .env,
+// non-secret settings (log channels, presence) from config.yml, both next
+// to package.json. Copied and trimmed from the VRChat Legends API backend
+// config, adapted for a standalone bot with no website.
 
+const fs = require('fs')
 const path = require('path')
+const yaml = require('js-yaml')
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') })
 
@@ -14,6 +17,33 @@ function int(value, fallback) {
 }
 
 const ROOT = path.join(__dirname, '..')
+
+function loadYaml() {
+  try {
+    const parsed = yaml.load(fs.readFileSync(path.join(ROOT, 'config.yml'), 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+const yml = loadYaml()
+
+const DEFAULT_PRESENCE = [
+  { type: 'custom', text: '/link to connect your VRChat' },
+  { type: 'watching', text: 'the group | /link' },
+]
+
+function presenceList() {
+  const raw = Array.isArray(yml.presence) ? yml.presence : []
+  const list = raw
+    .map((p) => ({
+      type: String(p?.type || 'custom').toLowerCase(),
+      text: String(p?.text || '').slice(0, 128),
+    }))
+    .filter((p) => p.text)
+  return list.length ? list : DEFAULT_PRESENCE
+}
 
 const config = {
   root: ROOT,
@@ -49,6 +79,16 @@ const config = {
   link: {
     codeTtlMinutes: 15,
   },
+
+  // Discord log channels from config.yml (empty string disables a log).
+  logs: {
+    linkChannelId: String(yml.logs?.link_channel_id || '').trim(),
+    roleChannelId: String(yml.logs?.role_channel_id || '').trim(),
+    alertChannelId: String(yml.logs?.alert_channel_id || '').trim(),
+  },
+
+  // Rich presence rotation from config.yml.
+  presence: presenceList(),
 
   log: {
     level: (process.env.LOG_LEVEL || 'info').toLowerCase(),

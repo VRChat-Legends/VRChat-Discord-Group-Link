@@ -6,10 +6,11 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 
 ## What it does
 
-- **Account linking**: members run `/link`, put a one time code in their VRChat bio, and the bot verifies it. Codes expire after 15 minutes.
+- **Account linking**: members run `/link`, put a one time code in their VRChat bio, and the bot verifies it. Codes expire after 15 minutes (shown as a live Discord countdown). Ambiguous names get an account picker, so nobody ever links the wrong profile.
 - **Two way role sync**: link any Discord role to any VRChat group role. Gain or lose the role on either platform and the bot mirrors it to the other one.
 - **Profile roles**: `/setup-misc-roles` creates 18+, VRC+, and all five trust rank roles (Visitor through Trusted User). Linked members get them automatically from their live VRChat profile.
 - **Stat tracker channels**: locked voice channels that display live numbers, like `Group Members: 1234`.
+- **Log channels**: optional Discord channels that receive embeds for links, unlinks, every role change the bot makes, and alerts.
 - **Member lookup**: `/get-member-info` builds an embed with everything the API knows about a user.
 - **Rate limit safe**: every VRChat API call is globally paced (default 1 per second, 30 per minute) and big member lists sync in small rotating batches. The bot will never hammer the VRChat API.
 
@@ -17,7 +18,7 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/link vrchat_user:<name or usr_ id>` | Everyone | Start linking. The bot gives you a code for your VRChat bio and a verify button. Run it while linked and it asks you to `/unlink` first. |
+| `/link vrchat_user:<name or usr_ id>` | Everyone | Start linking. Exact display names go straight to a bio code; fuzzy matches show a picker so you always link the right account. Run it while linked and it asks you to `/unlink` first. |
 | `/unlink` | Everyone | Remove your link. Bot managed profile roles are taken back. |
 | `/set-linked-role discord_role vrchat_role` | Admin | Pair a Discord role with a VRChat group role (autocomplete pulls the live role list from your group). |
 | `/remove-linked-role discord_role` | Admin | Remove a pair. Existing roles stay; they just stop syncing. |
@@ -54,7 +55,8 @@ Requirements: [Node.js 22.5+](https://nodejs.org) on Windows (or any OS; the .ba
    - `DISCORD_TOKEN` and `DISCORD_GUILD_ID`
    - `VRCHAT_GROUP_ID` (from your group page URL, `grp_...`)
    - `VRCHAT_EMAIL`, `VRCHAT_PASSWORD`, `VRCHAT_TOTP_SECRET`
-3. Run `run.bat`. Watch the log for `Gateway ready as ...` and `Session established`.
+3. Optional: open `config.yml` and set the log channel IDs (link log, role log, alert log) and the rich presence rotation.
+4. Run `run.bat`. Watch the log for `Gateway ready as ...` and `Session established`.
 
 On other platforms: `npm install` then `npm start`.
 
@@ -75,8 +77,10 @@ On other platforms: `npm install` then `npm start`.
 ## Data and logs
 
 - Everything lives in `data/`: `group-link.sqlite` (links, pairs, trackers), `vrchat_cookies.json` (session), and `logs/` (daily files, two weeks kept).
+- Secrets stay in `.env`; non-secret settings (log channels, presence) live in `config.yml`.
 - Logs never contain passwords, tokens, or cookies.
 - Delete `data/vrchat_cookies.json` to force a fresh VRChat login.
+- `test/simulate-link.js` runs the whole /link flow against the real VRChat API with mock Discord objects (needs VRChat credentials in the environment).
 
 ## Credits
 

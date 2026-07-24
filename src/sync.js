@@ -11,6 +11,7 @@ const config = require('./config')
 const db = require('./db')
 const logger = require('./logger')
 const vrc = require('./vrchatApi')
+const discordLog = require('./discordLog')
 
 const log = logger('Sync')
 
@@ -217,6 +218,13 @@ async function syncLinkedRolesForMember(member, groupMember) {
         if (targetDiscord) await member.roles.add(pair.discord_role_id, 'VRChat group role sync')
         else await member.roles.remove(pair.discord_role_id, 'VRChat group role sync')
         log.info(`${targetDiscord ? 'Added' : 'Removed'} @${pair.discord_role_name} ${targetDiscord ? 'to' : 'from'} ${member.user.tag} (VRChat side drove it)`)
+        discordLog.logRoleChange({
+          discordId: member.id,
+          action: targetDiscord ? 'added' : 'removed',
+          side: 'Discord',
+          roleName: `@${pair.discord_role_name}`,
+          drivenBy: 'VRChat group change',
+        })
       } catch (err) {
         log.warn(`discord role update failed for ${member.user.tag}:`, err.message)
         targetDiscord = hasDiscord
@@ -232,6 +240,13 @@ async function syncLinkedRolesForMember(member, groupMember) {
           if (targetVrchat) await vrc.addGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
           else await vrc.removeGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
           log.info(`${targetVrchat ? 'Added' : 'Removed'} VRChat role ${pair.vrchat_role_name} ${targetVrchat ? 'to' : 'from'} ${link.vrchat_name || link.vrchat_id} (Discord side drove it)`)
+          discordLog.logRoleChange({
+            discordId: member.id,
+            action: targetVrchat ? 'added' : 'removed',
+            side: 'VRChat',
+            roleName: pair.vrchat_role_name,
+            drivenBy: 'Discord role change',
+          })
         } catch (err) {
           log.warn(`vrchat role update failed for ${link.vrchat_id}:`, err.message)
           targetVrchat = hasVrchat
@@ -312,6 +327,13 @@ async function onMemberUpdate(oldMember, newMember) {
         if (nowHas) await vrc.addGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
         else await vrc.removeGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
         log.info(`Fast sync: ${nowHas ? 'added' : 'removed'} VRChat role ${pair.vrchat_role_name} for ${link.vrchat_name || link.vrchat_id}`)
+        discordLog.logRoleChange({
+          discordId: newMember.id,
+          action: nowHas ? 'added' : 'removed',
+          side: 'VRChat',
+          roleName: pair.vrchat_role_name,
+          drivenBy: 'Discord role change (instant)',
+        })
       } catch (err) {
         log.warn('fast sync failed:', err.message)
         continue
@@ -361,6 +383,7 @@ async function runCycle(client) {
     log.debug(`Cycle done in ${Date.now() - startedAt}ms (${links.length} links total)`)
   } catch (err) {
     log.error('Sync cycle failed:', err.message)
+    discordLog.logAlert('Sync cycle failed', err.message)
   } finally {
     running = false
   }

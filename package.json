@@ -22,6 +22,7 @@
   "dependencies": {
     "discord.js": "^14.21.0",
     "dotenv": "^17.3.1",
+    "js-yaml": "^5.2.2",
     "otplib": "^13.4.0",
     "undici": "^7.24.6"
   }

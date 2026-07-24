@@ -10,12 +10,14 @@ const {
   ButtonStyle,
   MessageFlags,
   PermissionFlagsBits,
+  StringSelectMenuBuilder,
 } = require('discord.js')
 const config = require('./config')
 const db = require('./db')
 const logger = require('./logger')
 const vrc = require('./vrchatApi')
 const sync = require('./sync')
+const discordLog = require('./discordLog')
 
 const log = logger('Interactions')
 
@@ -36,8 +38,9 @@ function generateCode() {
   return `VRCL-${out}`
 }
 
-function minutesLeft(expiresAt) {
-  return Math.max(1, Math.ceil((expiresAt - Date.now()) / 60000))
+function discordTime(ms, style = 'R') {
+  if (!Number.isFinite(ms)) return 'unknown'
+  return `<t:${Math.floor(ms / 1000)}:${style}>`
 }
 
 // ---------------------------------------------------------------
@@ -59,8 +62,29 @@ function codeInstructions(code, vrchatName, expiresAt) {
     `2. Add this code anywhere in your **bio**: \`${code}\``,
     `3. Save your bio, then press **I added it, verify now**`,
     '',
-    `The code expires in **${minutesLeft(expiresAt)} minutes**. You can remove it from your bio after verification.`,
+    `The code expires ${discordTime(expiresAt)}. You can remove it from your bio after verification.`,
   ].join('\n')
+}
+
+// Issue a fresh code for a confirmed VRChat user and show the instructions.
+async function issueCode(interaction, user, { viaUpdate = false } = {}) {
+  const taken = db.getLinkByVrchat(user.id)
+  if (taken && taken.discord_id !== interaction.user.id) {
+    const payload = { content: `**${user.displayName}** is already linked to another Discord account. If that is wrong, ask an admin.`, components: [] }
+    if (viaUpdate) await interaction.editReply(payload)
+    else await interaction.editReply(payload)
+    return
+  }
+
+  const code = generateCode()
+  const expiresAt = Date.now() + config.link.codeTtlMinutes * 60 * 1000
+  db.saveLinkCode(interaction.user.id, { code, vrchatId: user.id, vrchatName: user.displayName, expiresAt })
+  log.info(`/link code issued for ${interaction.user.tag} -> ${user.displayName} (${user.id})`)
+
+  await interaction.editReply({
+    content: codeInstructions(code, user.displayName, expiresAt),
+    components: [linkButtons()],
+  })
 }
 
 async function handleLink(interaction) {
@@ -87,34 +111,86 @@ async function handleLink(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral })
 
   const query = interaction.options.getString('vrchat_user', true).trim()
-  let user
+
+  // Direct usr_ id: no ambiguity.
+  if (/^usr_[0-9a-f-]{36}$/i.test(query)) {
+    let user
+    try {
+      user = await vrc.getUser(query)
+    } catch (err) {
+      log.error('/link user lookup failed:', err.message)
+      await interaction.editReply('VRChat lookup failed. Try again in a minute.')
+      return
+    }
+    if (!user) {
+      await interaction.editReply(`No VRChat user found for \`${query}\`.`)
+      return
+    }
+    await issueCode(interaction, user)
+    return
+  }
+
+  // Name search: VRChat search is fuzzy, so never silently pick a random
+  // match. Exact display name match proceeds; anything else gets a picker.
+  let matches = []
   try {
-    user = await vrc.resolveUser(query)
+    matches = await vrc.searchUsers(query, 10)
   } catch (err) {
-    log.error('/link user lookup failed:', err.message)
+    log.error('/link search failed:', err.message)
     await interaction.editReply('VRChat lookup failed. Try again in a minute.')
     return
   }
-  if (!user) {
-    await interaction.editReply(`No VRChat user found for **${query}**. Use your exact display name or your usr_ ID.`)
+
+  if (!matches.length) {
+    await interaction.editReply(
+      `No VRChat user found for **${query}**. Use your exact display name (spaces matter) or your usr_ ID from your profile URL.`
+    )
     return
   }
 
-  const taken = db.getLinkByVrchat(user.id)
-  if (taken) {
-    await interaction.editReply(`**${user.displayName}** is already linked to another Discord account. If that is wrong, ask an admin.`)
+  const exact = matches.filter((u) => String(u.displayName || '').toLowerCase() === query.toLowerCase())
+  if (exact.length === 1) {
+    let user
+    try {
+      user = await vrc.getUser(exact[0].id)
+    } catch {
+      user = exact[0]
+    }
+    await issueCode(interaction, user)
     return
   }
 
-  const code = generateCode()
-  const expiresAt = Date.now() + config.link.codeTtlMinutes * 60 * 1000
-  db.saveLinkCode(interaction.user.id, { code, vrchatId: user.id, vrchatName: user.displayName, expiresAt })
-  log.info(`/link code issued for ${interaction.user.tag} -> ${user.displayName} (${user.id})`)
-
+  // Multiple or fuzzy matches: let them pick their own account.
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId('link_pick')
+    .setPlaceholder('Pick your VRChat account')
+    .addOptions(matches.slice(0, 25).map((u) => ({
+      label: String(u.displayName || u.id).slice(0, 100),
+      description: String(u.statusDescription || u.id).slice(0, 100),
+      value: u.id,
+    })))
   await interaction.editReply({
-    content: codeInstructions(code, user.displayName, expiresAt),
-    components: [linkButtons()],
+    content: `I found **${matches.length}** VRChat account${matches.length === 1 ? '' : 's'} matching **${query}**. Pick yours:`,
+    components: [new ActionRowBuilder().addComponents(menu)],
   })
+}
+
+async function handleLinkPick(interaction) {
+  await interaction.deferUpdate()
+  const vrchatId = interaction.values?.[0]
+  let user
+  try {
+    user = await vrc.getUser(vrchatId)
+  } catch (err) {
+    log.error('link pick lookup failed:', err.message)
+    await interaction.editReply({ content: 'VRChat lookup failed. Run /link again.', components: [] })
+    return
+  }
+  if (!user) {
+    await interaction.editReply({ content: 'That account no longer exists. Run /link again.', components: [] })
+    return
+  }
+  await issueCode(interaction, user, { viaUpdate: true })
 }
 
 async function handleLinkVerify(interaction) {
@@ -150,6 +226,7 @@ async function handleLinkVerify(interaction) {
   db.deleteLinkCode(interaction.user.id)
   db.createLink(interaction.user.id, user.id, user.displayName)
   log.info(`Linked ${interaction.user.tag} <-> ${user.displayName} (${user.id})`)
+  discordLog.logLink(interaction.user.id, user.displayName, user.id)
 
   await interaction.editReply({
     content: `Linked! **${interaction.user.username}** is now connected to **${user.displayName}**. You can remove the code from your bio. Your roles will sync within a minute.`,
@@ -190,6 +267,7 @@ async function handleUnlink(interaction) {
   db.deleteLink(interaction.user.id)
   db.deleteLinkCode(interaction.user.id)
   log.info(`Unlinked ${interaction.user.tag} from ${existing.vrchat_name || existing.vrchat_id}`)
+  discordLog.logUnlink(interaction.user.id, existing.vrchat_name || existing.vrchat_id)
   await interaction.editReply(`Unlinked from **${existing.vrchat_name || existing.vrchat_id}**.`)
 }
 
@@ -420,8 +498,8 @@ async function handleGetMemberInfo(interaction) {
       { name: '18+ verified', value: vrc.isAgeVerified18Plus(user) ? 'Yes' : 'No', inline: true },
       { name: 'Status', value: `${user.status || 'unknown'}${user.statusDescription ? ` (${trimField(user.statusDescription, 100)})` : ''}`, inline: true },
       { name: 'Platform', value: user.last_platform || 'unknown', inline: true },
-      { name: 'Date joined', value: user.date_joined || 'unknown', inline: true },
-      { name: 'Last login', value: user.last_login ? new Date(user.last_login).toUTCString() : 'unknown', inline: true },
+      { name: 'Date joined', value: user.date_joined ? discordTime(Date.parse(user.date_joined), 'D') : 'unknown', inline: true },
+      { name: 'Last login', value: user.last_login ? discordTime(Date.parse(user.last_login), 'F') : 'unknown', inline: true },
       { name: 'Pronouns', value: trimField(user.pronouns, 50), inline: true },
       { name: 'Discord link', value: link ? `<@${link.discord_id}>` : 'Not linked', inline: true },
       { name: 'Group roles', value: trimField(groupRoleNames), inline: false },
@@ -501,6 +579,11 @@ async function handleInteraction(interaction) {
   if (interaction.isButton()) {
     if (interaction.customId === 'link_verify') await handleLinkVerify(interaction)
     else if (interaction.customId === 'link_cancel') await handleLinkCancel(interaction)
+    return
+  }
+
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'link_pick') await handleLinkPick(interaction)
     return
   }
 
