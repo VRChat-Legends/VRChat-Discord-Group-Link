@@ -43,6 +43,13 @@ function discordTime(ms, style = 'R') {
   return `<t:${Math.floor(ms / 1000)}:${style}>`
 }
 
+// Forgiving code match, same as the World Bridge linker: case, spacing,
+// and the dash do not matter, so a code retyped by hand on a Quest
+// keyboard still verifies.
+function normalizeCodeText(s) {
+  return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+}
+
 // ---------------------------------------------------------------
 // /link
 // ---------------------------------------------------------------
@@ -54,15 +61,15 @@ function linkButtons() {
   )
 }
 
-function codeInstructions(code, vrchatName, expiresAt) {
+function codeInstructions(code, vrchatName, expiresAt, vrchatId) {
   return [
-    `Linking to VRChat user: **${vrchatName}**`,
+    `Linking to VRChat user: **${vrchatName}**${vrchatId ? ` (\`${vrchatId}\`)` : ''}`,
     '',
-    `1. Open your VRChat profile (vrchat.com or the app)`,
-    `2. Add this code anywhere in your **bio**: \`${code}\``,
-    `3. Save your bio, then press **I added it, verify now**`,
+    `1. Open your VRChat profile (vrchat.com or the quick menu in game)`,
+    `2. Put this code in your **bio or status**: \`${code}\``,
+    `3. Save, then press **I added it, verify now**`,
     '',
-    `The code expires ${discordTime(expiresAt)}. You can remove it from your bio after verification.`,
+    `The code expires ${discordTime(expiresAt)}. Capitalization, spaces, and the dash do not matter. You can remove the code after verification.`,
   ].join('\n')
 }
 
@@ -82,7 +89,7 @@ async function issueCode(interaction, user, { viaUpdate = false } = {}) {
   log.info(`/link code issued for ${interaction.user.tag} -> ${user.displayName} (${user.id})`)
 
   await interaction.editReply({
-    content: codeInstructions(code, user.displayName, expiresAt),
+    content: codeInstructions(code, user.displayName, expiresAt, user.id),
     components: [linkButtons()],
   })
 }
@@ -101,7 +108,7 @@ async function handleLink(interaction) {
   const pending = db.getLinkCode(interaction.user.id)
   if (pending) {
     await interaction.reply({
-      content: codeInstructions(pending.code, pending.vrchat_name || pending.vrchat_id, pending.expires_at),
+      content: codeInstructions(pending.code, pending.vrchat_name || pending.vrchat_id, pending.expires_at, pending.vrchat_id),
       components: [linkButtons()],
       flags: MessageFlags.Ephemeral,
     })
@@ -214,10 +221,18 @@ async function handleLinkVerify(interaction) {
     return
   }
 
-  const bio = String(user?.bio || '')
-  if (!bio.toUpperCase().includes(pending.code.toUpperCase())) {
+  // Same rules as the World Bridge linker: the code counts if it is in
+  // the bio OR the status, and formatting differences never block it.
+  const haystack = `${user?.bio || ''}\n${user?.statusDescription || ''}`
+  if (!normalizeCodeText(haystack).includes(normalizeCodeText(pending.code))) {
+    log.info(`link verify miss for ${interaction.user.tag}: account=${pending.vrchat_id} bioLen=${(user?.bio || '').length} statusLen=${(user?.statusDescription || '').length}`)
     await interaction.editReply({
-      content: `${codeInstructions(pending.code, pending.vrchat_name || pending.vrchat_id, pending.expires_at)}\n\nI do not see the code in your bio yet. VRChat can take a minute to save; try again shortly.`,
+      content: [
+        codeInstructions(pending.code, user?.displayName || pending.vrchat_name || pending.vrchat_id, pending.expires_at, pending.vrchat_id),
+        '',
+        'I do not see the code in your bio or status yet. VRChat can take a few minutes to publish profile edits (re-saving your profile helps).',
+        `Double check you are editing this account: **${user?.displayName || pending.vrchat_name}** (\`${pending.vrchat_id}\`).`,
+      ].join('\n'),
       components: [linkButtons()],
     })
     return
@@ -229,7 +244,7 @@ async function handleLinkVerify(interaction) {
   discordLog.logLink(interaction.user.id, user.displayName, user.id)
 
   await interaction.editReply({
-    content: `Linked! **${interaction.user.username}** is now connected to **${user.displayName}**. You can remove the code from your bio. Your roles will sync within a minute.`,
+    content: `Linked! **${interaction.user.username}** is now connected to **${user.displayName}**. You can remove the code from your profile. Your roles will sync within a minute.`,
     components: [],
   })
 

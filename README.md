@@ -6,7 +6,7 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 
 ## What it does
 
-- **Account linking**: members run `/link`, put a one time code in their VRChat bio, and the bot verifies it. Codes expire after 15 minutes (shown as a live Discord countdown). Ambiguous names get an account picker, so nobody ever links the wrong profile.
+- **Account linking**: members run `/link`, put a one time code in their VRChat bio **or status**, and the bot verifies it (capitalization, spaces, and the dash do not matter). Codes expire after 15 minutes (shown as a live Discord countdown). Ambiguous names get an account picker, so nobody ever links the wrong profile.
 - **Two way role sync**: link any Discord role to any VRChat group role. Gain or lose the role on either platform and the bot mirrors it to the other one.
 - **Profile roles**: `/setup-misc-roles` creates 18+, VRC+, and all five trust rank roles (Visitor through Trusted User). Linked members get them automatically from their live VRChat profile.
 - **Stat tracker channels**: locked voice channels that display live numbers, like `Group Members: 1234`.
@@ -19,7 +19,7 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 
 | Command | Who | What |
 | --- | --- | --- |
-| `/link vrchat_user:<name or usr_ id>` | Everyone | Start linking. Exact display names go straight to a bio code; fuzzy matches show a picker so you always link the right account. Run it while linked and it asks you to `/unlink` first. |
+| `/link vrchat_user:<name or usr_ id>` | Everyone | Start linking. Exact display names go straight to a code for your bio or status; fuzzy matches show a picker so you always link the right account. Run it while linked and it asks you to `/unlink` first. |
 | `/unlink` | Everyone | Remove your link. Bot managed profile roles are taken back. |
 | `/set-linked-role discord_role vrchat_role` | Admin | Pair a Discord role with a VRChat group role (autocomplete pulls the live role list from your group). |
 | `/remove-linked-role discord_role` | Admin | Remove a pair. Existing roles stay; they just stop syncing. |
