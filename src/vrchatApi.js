@@ -24,11 +24,32 @@ async function authedRequest(method, apiPath, { body, retried = false } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   })
 
-  if ((res.status === 401 || res.status === 403) && !retried) {
-    log.warn(`HTTP ${res.status} on ${method} ${apiPath}; forcing re-login and retrying once`)
+  if (res.status === 401 && !retried) {
+    log.warn(`HTTP 401 on ${method} ${apiPath}; forcing re-login and retrying once`)
     invalidateAuthCookies()
     await getAuthCookies({ force: true })
     return authedRequest(method, apiPath, { body, retried: true })
+  }
+
+  if (res.status === 403) {
+    // A 403 with an API message is a real refusal (group hierarchy or a
+    // missing group permission), not an auth problem: re-logging in would
+    // never help, so surface it as a typed error instead.
+    const text = await res.text().catch(() => '')
+    let msg = ''
+    try {
+      msg = JSON.parse(text)?.error?.message || ''
+    } catch { /* not json */ }
+    if (!msg && !retried) {
+      log.warn(`HTTP 403 with no message on ${method} ${apiPath}; forcing re-login and retrying once`)
+      invalidateAuthCookies()
+      await getAuthCookies({ force: true })
+      return authedRequest(method, apiPath, { body, retried: true })
+    }
+    const err = new Error(`VRChat refused ${method} ${apiPath}: ${msg || 'HTTP 403'}`)
+    err.status = 403
+    err.vrchatMessage = msg
+    throw err
   }
 
   if (res.status === 429) {

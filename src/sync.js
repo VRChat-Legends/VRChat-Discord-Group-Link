@@ -37,6 +37,53 @@ let running = false
 let userCursor = 0
 
 // ---------------------------------------------------------------
+// VRChat hierarchy refusals
+// ---------------------------------------------------------------
+
+// VRChat only lets an account edit members BELOW its own highest group
+// role, no matter what Discord permissions the bot has. When that (or a
+// missing group permission) blocks an edit, pause VRChat role edits for
+// that member instead of retrying every cycle, and alert once.
+const HIERARCHY_BLOCK_MS = 6 * 60 * 60 * 1000
+const hierarchyBlockedUntil = new Map()
+const hierarchyAlerted = new Set()
+
+function isHierarchyError(err) {
+  return err?.status === 403 || /same or higher rank|not allowed/i.test(String(err?.message || ''))
+}
+
+function isHierarchyBlocked(vrchatId) {
+  const until = hierarchyBlockedUntil.get(vrchatId)
+  if (!until) return false
+  if (Date.now() > until) {
+    hierarchyBlockedUntil.delete(vrchatId)
+    return false
+  }
+  return true
+}
+
+function noteHierarchyBlock(link, roleName, err) {
+  hierarchyBlockedUntil.set(link.vrchat_id, Date.now() + HIERARCHY_BLOCK_MS)
+  const who = link.vrchat_name || link.vrchat_id
+  log.warn(`VRChat refuses role edits for ${who} (group hierarchy or permissions): ${err.vrchatMessage || err.message}`)
+  if (hierarchyAlerted.has(link.vrchat_id)) return
+  hierarchyAlerted.add(link.vrchat_id)
+  discordLog.logAlert(
+    'VRChat blocks role sync for a member',
+    [
+      `I cannot edit the VRChat group roles of **${who}** (tried **${roleName}**).`,
+      `VRChat said: ${err.vrchatMessage || err.message}`,
+      '',
+      'VRChat only lets an account edit members **below** its own highest group role; Discord admin does not matter here. Fix it in the VRChat group settings:',
+      '1. Move the bot account\'s group role above the roles of every member it should manage, and',
+      '2. Make sure that role has the **Manage Group Member Data** permission.',
+      '',
+      'I paused VRChat role edits for this member for 6 hours so the logs stay clean.',
+    ].join('\n')
+  )
+}
+
+// ---------------------------------------------------------------
 // cached group roles (for autocomplete and name lookups)
 // ---------------------------------------------------------------
 
@@ -233,7 +280,7 @@ async function syncLinkedRolesForMember(member, groupMember) {
 
     // Apply VRChat side (only possible when they are in the group)
     if (targetVrchat !== hasVrchat) {
-      if (!inGroup) {
+      if (!inGroup || isHierarchyBlocked(link.vrchat_id)) {
         targetVrchat = hasVrchat
       } else {
         try {
@@ -248,7 +295,8 @@ async function syncLinkedRolesForMember(member, groupMember) {
             drivenBy: 'Discord role change',
           })
         } catch (err) {
-          log.warn(`vrchat role update failed for ${link.vrchat_id}:`, err.message)
+          if (isHierarchyError(err)) noteHierarchyBlock(link, pair.vrchat_role_name, err)
+          else log.warn(`vrchat role update failed for ${link.vrchat_id}:`, err.message)
           targetVrchat = hasVrchat
         }
       }
@@ -301,6 +349,7 @@ async function syncOneUser(client, discordId) {
 async function onMemberUpdate(oldMember, newMember) {
   const link = db.getLinkByDiscord(newMember.id)
   if (!link) return
+  if (isHierarchyBlocked(link.vrchat_id)) return
   const pairs = db.listLinkedRoles()
   if (!pairs.length) return
 
@@ -335,7 +384,8 @@ async function onMemberUpdate(oldMember, newMember) {
           drivenBy: 'Discord role change (instant)',
         })
       } catch (err) {
-        log.warn('fast sync failed:', err.message)
+        if (isHierarchyError(err)) noteHierarchyBlock(link, pair.vrchat_role_name, err)
+        else log.warn('fast sync failed:', err.message)
         continue
       }
     }

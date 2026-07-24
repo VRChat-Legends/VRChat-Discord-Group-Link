@@ -76,6 +76,10 @@ On other platforms: `npm install` then `npm start`.
 - Per member and per linked pair the bot stores the last state of both sides. Whichever side changed gets mirrored; if both sides changed against each other in the same window, Discord wins.
 - Tracker channels rename at most once every 6 minutes per channel because Discord itself limits channel renames to about 2 per 10 minutes.
 
+## Troubleshooting
+
+- **"You're not allowed to change a member of the same or higher rank" (HTTP 403)**: VRChat only lets an account edit members **below** its own highest group role; the bot having Discord admin changes nothing. In the VRChat group settings, move the bot account's role above the roles of everyone it should manage and give that role **Manage Group Member Data**. The bot pauses role edits for an affected member for 6 hours and posts one alert instead of spamming.
+
 ## Data and logs
 
 - Everything lives in `data/`: `group-link.sqlite` (links, pairs, trackers), `vrchat_cookies.json` (session), and `logs/` (daily files, two weeks kept).
