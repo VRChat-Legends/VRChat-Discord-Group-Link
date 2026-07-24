@@ -11,6 +11,7 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 - **Profile roles**: `/setup-misc-roles` creates 18+, VRC+, and all five trust rank roles (Visitor through Trusted User). Linked members get them automatically from their live VRChat profile.
 - **Stat tracker channels**: locked voice channels that display live numbers, like `Group Members: 1234`.
 - **Log channels**: optional Discord channels that receive embeds for links, unlinks, every role change the bot makes, and alerts.
+- **Group audit log feed**: the bot watches your VRChat group's audit log and posts an embed for every event: warns, kicks, bans, unbans, joins, leaves, join requests, invites, role changes, posts, instances, and settings changes. Each category can go to its own channel (set in `config.yml`), with a default channel catching the rest. Linked members show up with their Discord account right in the embed.
 - **Member lookup**: `/get-member-info` builds an embed with everything the API knows about a user.
 - **Rate limit safe**: every VRChat API call is globally paced (default 1 per second, 30 per minute) and big member lists sync in small rotating batches. The bot will never hammer the VRChat API.
 
@@ -55,7 +56,7 @@ Requirements: [Node.js 22.5+](https://nodejs.org) on Windows (or any OS; the .ba
    - `DISCORD_TOKEN` and `DISCORD_GUILD_ID`
    - `VRCHAT_GROUP_ID` (from your group page URL, `grp_...`)
    - `VRCHAT_EMAIL`, `VRCHAT_PASSWORD`, `VRCHAT_TOTP_SECRET`
-3. Optional: open `config.yml` and set the log channel IDs (link log, role log, alert log) and the rich presence rotation.
+3. Optional: open `config.yml` and set the log channel IDs (link log, role log, alert log), the group audit log channels (warn, kick, ban, join, and friends), and the rich presence rotation.
 4. Run `run.bat`. Watch the log for `Gateway ready as ...` and `Session established`.
 
 On other platforms: `npm install` then `npm start`.

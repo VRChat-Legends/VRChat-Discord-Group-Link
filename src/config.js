@@ -45,6 +45,20 @@ function presenceList() {
   return list.length ? list : DEFAULT_PRESENCE
 }
 
+const GROUP_LOG_CATEGORIES = [
+  'default', 'warn', 'kick', 'ban', 'unban', 'join', 'leave',
+  'join_request', 'invite', 'role', 'post', 'instance', 'group',
+]
+
+function groupLogChannels() {
+  const raw = yml.group_logs?.channels || {}
+  const channels = {}
+  for (const key of GROUP_LOG_CATEGORIES) {
+    channels[key] = String(raw[`${key}_channel_id`] || '').trim()
+  }
+  return channels
+}
+
 const config = {
   root: ROOT,
   dataDir: path.join(ROOT, 'data'),
@@ -89,6 +103,12 @@ const config = {
 
   // Rich presence rotation from config.yml.
   presence: presenceList(),
+
+  // VRChat group audit log feed from config.yml (group_logs section).
+  groupLogs: {
+    pollSeconds: Math.max(30, int(yml.group_logs?.poll_seconds, 60)),
+    channels: groupLogChannels(),
+  },
 
   log: {
     level: (process.env.LOG_LEVEL || 'info').toLowerCase(),

@@ -116,6 +116,22 @@ async function getGroupInstances() {
   return Array.isArray(data) ? data : []
 }
 
+/**
+ * Group audit logs, newest first. Pass startDate (ISO) to only get entries
+ * after that time. Returns { results, totalCount, hasNext }.
+ */
+async function getGroupAuditLogs({ startDate, n = 100, offset = 0 } = {}) {
+  const params = new URLSearchParams()
+  params.set('n', String(Math.min(100, Math.max(1, n))))
+  params.set('offset', String(offset))
+  if (startDate) params.set('startDate', startDate)
+  const data = await authedRequest(
+    'GET',
+    `/groups/${encodeURIComponent(config.vrchat.groupId)}/auditLogs?${params}`
+  )
+  return data && Array.isArray(data.results) ? data : { results: [], totalCount: 0, hasNext: false }
+}
+
 // ---------------------------------------------------------------
 // profile parsing helpers
 // ---------------------------------------------------------------
@@ -158,6 +174,7 @@ module.exports = {
   addGroupMemberRole,
   removeGroupMemberRole,
   getGroupInstances,
+  getGroupAuditLogs,
   getTrustRank,
   hasVrcPlus,
   isAgeVerified18Plus,

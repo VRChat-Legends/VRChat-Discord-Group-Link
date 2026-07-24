@@ -71,6 +71,12 @@ function getDb() {
       discord_role_id TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    -- Small key/value store (audit log watermark, seen ids, etc.)
+    CREATE TABLE IF NOT EXISTS kv (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT ''
+    );
   `)
   return db
 }
@@ -209,6 +215,26 @@ function getMiscRoles() {
   return map
 }
 
+// ---------------------------------------------------------------
+// key/value store
+// ---------------------------------------------------------------
+
+function getKv(key, fallback = null) {
+  const row = getDb().prepare('SELECT value FROM kv WHERE key = ?').get(String(key))
+  if (!row) return fallback
+  try {
+    return JSON.parse(row.value)
+  } catch {
+    return fallback
+  }
+}
+
+function setKv(key, value) {
+  getDb()
+    .prepare('INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)')
+    .run(String(key), JSON.stringify(value))
+}
+
 module.exports = {
   getDb,
   getLinkByDiscord,
@@ -231,4 +257,6 @@ module.exports = {
   updateTracker,
   setMiscRole,
   getMiscRoles,
+  getKv,
+  setKv,
 }

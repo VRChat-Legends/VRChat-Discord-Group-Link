@@ -21,3 +21,37 @@ presence:
   - { type: custom, text: "/link to connect your VRChat" }
   - { type: watching, text: "the group | /link" }
   - { type: listening, text: "/ping" }
+
+# VRChat group audit log feed: the bot polls your group's audit log and
+# posts an embed for every event into the channel set for its category.
+# A category with no channel falls back to default_channel_id; if that is
+# empty too, that category is skipped. Costs 1 VRChat API call per poll.
+group_logs:
+  poll_seconds: 60
+  channels:
+    # Fallback for categories without their own channel and unknown events
+    default_channel_id: ""
+    # Instance warnings
+    warn_channel_id: ""
+    # Instance kicks and group kicks
+    kick_channel_id: ""
+    # Bans
+    ban_channel_id: ""
+    # Unbans
+    unban_channel_id: ""
+    # Members joining the group
+    join_channel_id: ""
+    # Members leaving or removed
+    leave_channel_id: ""
+    # Join requests (created, denied, blocked)
+    join_request_channel_id: ""
+    # Group invites
+    invite_channel_id: ""
+    # Group role changes (created, updated, assigned, removed)
+    role_channel_id: ""
+    # Group posts and announcements
+    post_channel_id: ""
+    # Group instances opened or closed
+    instance_channel_id: ""
+    # Group settings updates
+    group_channel_id: ""
