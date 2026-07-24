@@ -1,0 +1,28 @@
+{
+  "name": "vrchat-discord-group-link",
+  "version": "1.0.0",
+  "description": "Discord bot that links Discord members to their VRChat accounts and keeps Discord roles and VRChat group roles in sync. By VRChat Legends.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch --watch-path=./src src/index.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "keywords": [
+    "vrchat",
+    "discord",
+    "group",
+    "role-sync",
+    "vrchat-legends"
+  ],
+  "author": "VRChat Legends",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.21.0",
+    "dotenv": "^17.3.1",
+    "otplib": "^13.4.0",
+    "undici": "^7.24.6"
+  }
+}

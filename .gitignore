@@ -1,0 +1,12 @@
+# Secrets and local state
+.env
+data/
+node_modules/
+
+# OS noise
+Thumbs.db
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
