@@ -32,7 +32,7 @@ function isAdmin(interaction) {
   )
 }
 
-// Codes read well in a bio and cannot be mistyped: VRCL-XXXXXX.
+// Codes read well in a status message and cannot be mistyped: VRCL-XXXXXX.
 function generateCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let out = ''
@@ -67,11 +67,11 @@ function codeInstructions(code, vrchatName, expiresAt, vrchatId) {
   return [
     `Linking to VRChat user: **${vrchatName}**${vrchatId ? ` (\`${vrchatId}\`)` : ''}`,
     '',
-    `1. Open your VRChat profile (vrchat.com or the quick menu in game)`,
-    `2. Put this code in your **bio or status**: \`${code}\``,
+    `1. Open VRChat (quick menu in game, or vrchat.com)`,
+    `2. Set your **status message** to this code: \`${code}\``,
     `3. Save, then press **I added it, verify now**`,
     '',
-    `The code expires ${discordTime(expiresAt)}. Capitalization, spaces, and the dash do not matter. You can remove the code after verification.`,
+    `The code expires ${discordTime(expiresAt)}. Capitalization, spaces, and the dash do not matter. You can change your status back after verification.`,
   ].join('\n')
 }
 
@@ -223,16 +223,17 @@ async function handleLinkVerify(interaction) {
     return
   }
 
-  // Same rules as the World Bridge linker: the code counts if it is in
-  // the bio OR the status, and formatting differences never block it.
-  const haystack = `${user?.bio || ''}\n${user?.statusDescription || ''}`
+  // Status based linking: the code must be in the status message. Same
+  // forgiving matching as the World Bridge linker, so formatting
+  // differences never block it.
+  const haystack = String(user?.statusDescription || '')
   if (!normalizeCodeText(haystack).includes(normalizeCodeText(pending.code))) {
-    log.info(`link verify miss for ${interaction.user.tag}: account=${pending.vrchat_id} bioLen=${(user?.bio || '').length} statusLen=${(user?.statusDescription || '').length}`)
+    log.info(`link verify miss for ${interaction.user.tag}: account=${pending.vrchat_id} statusLen=${haystack.length}`)
     await interaction.editReply({
       content: [
         codeInstructions(pending.code, user?.displayName || pending.vrchat_name || pending.vrchat_id, pending.expires_at, pending.vrchat_id),
         '',
-        'I do not see the code in your bio or status yet. VRChat can take a few minutes to publish profile edits (re-saving your profile helps).',
+        'I do not see the code in your status yet. VRChat can take a minute to publish profile edits (re-saving helps).',
         `Double check you are editing this account: **${user?.displayName || pending.vrchat_name}** (\`${pending.vrchat_id}\`).`,
       ].join('\n'),
       components: [linkButtons()],
@@ -246,7 +247,7 @@ async function handleLinkVerify(interaction) {
   discordLog.logLink(interaction.user.id, user.displayName, user.id)
 
   await interaction.editReply({
-    content: `Linked! **${interaction.user.username}** is now connected to **${user.displayName}**. You can remove the code from your profile. Your roles will sync within a minute.`,
+    content: `Linked! **${interaction.user.username}** is now connected to **${user.displayName}**. You can change your status back. Your roles will sync within a minute.`,
     components: [],
   })
 

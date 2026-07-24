@@ -1,6 +1,6 @@
 'use strict'
 
-// One-off end to end test for bio-or-status verification. Puts a test code
+// One-off end to end test for status based verification. Puts a test code
 // in the bot account's own statusDescription (mangled formatting), runs the
 // verify handler against it, then restores the original status.
 
