@@ -440,12 +440,32 @@ async function handlePing(interaction) {
   const roundTrip = Date.now() - sent
   const ws = Math.max(0, Math.round(interaction.client.ws.ping))
   const vrchatOk = await sync.vrchatHealthy()
+
+  // Setup health: spot the usual reasons roles are not landing.
+  const miscRoles = db.getMiscRoles()
+  const miscKeys = Object.keys(miscRoles)
+  let miscStatus = 'not set up (run **/setup-misc-roles**)'
+  if (miscKeys.length) {
+    const me = interaction.guild?.members?.me
+    const missing = miscKeys.filter((k) => !interaction.guild?.roles.cache.get(miscRoles[k]))
+    const unassignable = me
+      ? miscKeys.filter((k) => {
+        const role = interaction.guild.roles.cache.get(miscRoles[k])
+        return role && role.position >= me.roles.highest.position
+      })
+      : []
+    if (missing.length) miscStatus = `**${missing.length}** deleted (${missing.join(', ')}); re-run /setup-misc-roles`
+    else if (unassignable.length) miscStatus = `**${unassignable.length}** above my highest role (${unassignable.join(', ')}); move my role up in Server Settings, Roles`
+    else miscStatus = `**${miscKeys.length}** roles ready`
+  }
+
   await interaction.editReply(
     [
       `**Pong!**`,
       `Discord round trip: **${roundTrip}ms** | Gateway: **${ws}ms**`,
       `VRChat API: ${vrchatOk ? '**authenticated**' : '**not authenticated** (check credentials in .env)'}`,
       `Links: **${db.listLinks().length}** | Linked roles: **${db.listLinkedRoles().length}** | Trackers: **${db.listTrackers().length}**`,
+      `Misc roles: ${miscStatus}`,
     ].join('\n')
   )
 }

@@ -193,10 +193,36 @@ async function applyMiscRoles(member, vrchatUser) {
       if (want) await member.roles.add(roleId, 'VRChat profile sync')
       else await member.roles.remove(roleId, 'VRChat profile sync')
       log.info(`${want ? 'Added' : 'Removed'} misc role ${key} ${want ? 'to' : 'from'} ${member.user.tag}`)
+      discordLog.logRoleChange({
+        discordId: member.id,
+        action: want ? 'added' : 'removed',
+        side: 'Discord',
+        roleName: `<@&${roleId}> (${key})`,
+        drivenBy: 'VRChat profile (misc role)',
+      })
     } catch (err) {
       log.warn(`misc role ${key} update failed for ${member.user.tag}:`, err.message)
+      noteMiscRolePermissionProblem(key, roleId, err)
     }
   }
+}
+
+// Discord refuses role edits when the bot's highest role is not above the
+// role being assigned (or Manage Roles is missing). Alert once per role.
+const miscRoleAlerted = new Set()
+function noteMiscRolePermissionProblem(key, roleId, err) {
+  const msg = String(err?.message || '')
+  if (!/missing permissions|missing access|hierarchy/i.test(msg)) return
+  if (miscRoleAlerted.has(key)) return
+  miscRoleAlerted.add(key)
+  discordLog.logAlert(
+    'Discord blocks a misc role',
+    [
+      `I cannot assign <@&${roleId}> (**${key}**): ${msg}`,
+      '',
+      'Fix in Discord server settings, Roles: drag the bot\'s role **above** the 18+, VRC+, and trust rank roles, and make sure the bot has **Manage Roles**.',
+    ].join('\n')
+  )
 }
 
 async function removeMiscRoles(client, discordId) {
@@ -441,6 +467,9 @@ async function runCycle(client) {
 
 function startLoop(client) {
   const intervalMs = config.sync.intervalSeconds * 1000
+  if (!Object.keys(db.getMiscRoles()).length) {
+    log.info('Misc roles are not set up yet; run /setup-misc-roles to enable 18+, VRC+, and trust rank roles.')
+  }
   setTimeout(() => runCycle(client), 10_000)
   const timer = setInterval(() => runCycle(client), intervalMs)
   timer.unref?.()
