@@ -2,7 +2,7 @@
 
 // Slash command definitions + guild registration.
 
-const { PermissionFlagsBits, REST, Routes, SlashCommandBuilder } = require('discord.js')
+const { ChannelType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } = require('discord.js')
 const config = require('./config')
 const logger = require('./logger')
 
@@ -88,6 +88,16 @@ function buildCommands() {
     .setDescription('Create the 18+, VRC+, and trust rank roles the bot assigns to linked users')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 
+  const setupLogChannels = new SlashCommandBuilder()
+    .setName('setup-log-channels')
+    .setDescription('Create every log channel in a category and fill config.yml automatically')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption((o) => o
+      .setName('category')
+      .setDescription('The category the log channels go in')
+      .addChannelTypes(ChannelType.GuildCategory)
+      .setRequired(true))
+
   return [
     link,
     unlink,
@@ -98,6 +108,7 @@ function buildCommands() {
     ping,
     getMemberInfo,
     setupMiscRoles,
+    setupLogChannels,
   ].map((c) => c.toJSON())
 }
 

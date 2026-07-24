@@ -128,5 +128,46 @@ function validate() {
   return missing
 }
 
+// Write channel ids into config.yml (comment preserving, section aware:
+// role_channel_id exists under both logs: and group_logs:) and apply them
+// to the running process so no restart is needed.
+// assignments: [{ section: 'logs' | 'group_logs', key: 'warn_channel_id', id }]
+function writeChannelIds(assignments) {
+  const file = path.join(ROOT, 'config.yml')
+  let text = ''
+  try {
+    text = fs.readFileSync(file, 'utf8')
+  } catch {
+    text = ''
+  }
+  let section = ''
+  const out = text.split(/\r?\n/).map((line) => {
+    const top = line.match(/^([A-Za-z_]+):/)
+    if (top) {
+      section = top[1]
+      return line
+    }
+    const kv = line.match(/^(\s+)([A-Za-z0-9_]+):.*$/)
+    if (!kv) return line
+    const hit = assignments.find((a) => a.section === section && a.key === kv[2])
+    return hit ? `${kv[1]}${kv[2]}: "${hit.id}"` : line
+  })
+  fs.writeFileSync(file, out.join('\n'))
+
+  const logsMap = {
+    link_channel_id: 'linkChannelId',
+    role_channel_id: 'roleChannelId',
+    alert_channel_id: 'alertChannelId',
+  }
+  for (const a of assignments) {
+    if (a.section === 'logs' && logsMap[a.key]) config.logs[logsMap[a.key]] = String(a.id)
+    if (a.section === 'group_logs') {
+      const cat = a.key.replace(/_channel_id$/, '')
+      if (cat in config.groupLogs.channels) config.groupLogs.channels[cat] = String(a.id)
+    }
+  }
+}
+
 module.exports = config
 module.exports.validate = validate
+module.exports.writeChannelIds = writeChannelIds

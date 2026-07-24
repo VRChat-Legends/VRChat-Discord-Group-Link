@@ -287,6 +287,7 @@ async function poll() {
 
 function start(client) {
   clientRef = client
+  if (pollTimer) return
 
   if (!anyChannelConfigured()) {
     log.info('No group log channels set in config.yml; audit log feed disabled.')

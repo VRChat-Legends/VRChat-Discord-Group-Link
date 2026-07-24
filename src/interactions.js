@@ -8,6 +8,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   MessageFlags,
   PermissionFlagsBits,
   StringSelectMenuBuilder,
@@ -18,6 +19,7 @@ const logger = require('./logger')
 const vrc = require('./vrchatApi')
 const sync = require('./sync')
 const discordLog = require('./discordLog')
+const groupLogs = require('./groupLogs')
 
 const log = logger('Interactions')
 
@@ -582,6 +584,106 @@ async function handleSetupMiscRoles(interaction) {
 }
 
 // ---------------------------------------------------------------
+// /setup-log-channels
+// ---------------------------------------------------------------
+
+// One channel per row; a channel can serve several config keys.
+const LOG_CHANNEL_PLAN = [
+  { name: 'link-logs', desc: 'Account links and unlinks', keys: [{ section: 'logs', key: 'link_channel_id' }] },
+  { name: 'role-logs', desc: 'Role changes the bot made', keys: [{ section: 'logs', key: 'role_channel_id' }] },
+  { name: 'bot-alerts', desc: 'Bot errors that need a human', keys: [{ section: 'logs', key: 'alert_channel_id' }] },
+  { name: 'vrc-warns', desc: 'VRChat instance warnings', keys: [{ section: 'group_logs', key: 'warn_channel_id' }] },
+  { name: 'vrc-kicks', desc: 'VRChat kicks', keys: [{ section: 'group_logs', key: 'kick_channel_id' }] },
+  { name: 'vrc-bans', desc: 'VRChat bans and unbans', keys: [{ section: 'group_logs', key: 'ban_channel_id' }, { section: 'group_logs', key: 'unban_channel_id' }] },
+  { name: 'vrc-joins-leaves', desc: 'Members joining and leaving the group', keys: [{ section: 'group_logs', key: 'join_channel_id' }, { section: 'group_logs', key: 'leave_channel_id' }] },
+  { name: 'vrc-join-requests', desc: 'Join requests and invites', keys: [{ section: 'group_logs', key: 'join_request_channel_id' }, { section: 'group_logs', key: 'invite_channel_id' }] },
+  { name: 'vrc-role-logs', desc: 'VRChat group role changes', keys: [{ section: 'group_logs', key: 'role_channel_id' }] },
+  { name: 'vrc-group-logs', desc: 'Posts, instances, settings, and everything else', keys: [{ section: 'group_logs', key: 'post_channel_id' }, { section: 'group_logs', key: 'instance_channel_id' }, { section: 'group_logs', key: 'group_channel_id' }, { section: 'group_logs', key: 'default_channel_id' }] },
+]
+
+function currentChannelIdFor(entry) {
+  if (entry.section === 'logs') {
+    const map = { link_channel_id: 'linkChannelId', role_channel_id: 'roleChannelId', alert_channel_id: 'alertChannelId' }
+    return config.logs[map[entry.key]] || ''
+  }
+  return config.groupLogs.channels[entry.key.replace(/_channel_id$/, '')] || ''
+}
+
+async function handleSetupLogChannels(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({ content: 'Run this inside the server.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  const category = interaction.options.getChannel('category', true)
+  if (category.type !== ChannelType.GuildCategory) {
+    await interaction.reply({ content: 'Pick a channel **category**, not a regular channel.', flags: MessageFlags.Ephemeral })
+    return
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const lines = []
+  const assignments = []
+
+  for (const plan of LOG_CHANNEL_PLAN) {
+    // Keys still needing a channel (unset, or pointing at a deleted one).
+    const needy = plan.keys.filter((k) => {
+      const cur = currentChannelIdFor(k)
+      return !cur || !interaction.guild.channels.cache.get(cur)
+    })
+    if (!needy.length) {
+      const keptId = currentChannelIdFor(plan.keys[0])
+      lines.push(`Kept <#${keptId}> (${plan.desc})`)
+      continue
+    }
+
+    // Reuse a same-named channel already in the category before creating.
+    let channel = interaction.guild.channels.cache.find(
+      (c) => c.parentId === category.id && c.type === ChannelType.GuildText && c.name === plan.name
+    ) || null
+    if (!channel) {
+      channel = await interaction.guild.channels.create({
+        name: plan.name,
+        type: ChannelType.GuildText,
+        parent: category.id,
+        topic: plan.desc,
+        permissionOverwrites: [
+          { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+          {
+            id: interaction.client.user.id,
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks],
+          },
+        ],
+        reason: 'VRChat-Discord Group Link log channels',
+      })
+      lines.push(`Created <#${channel.id}> (${plan.desc})`)
+    } else {
+      lines.push(`Reused <#${channel.id}> (${plan.desc})`)
+    }
+    for (const k of needy) assignments.push({ ...k, id: channel.id })
+  }
+
+  if (assignments.length) config.writeChannelIds(assignments)
+
+  // The audit log feed skips startup when no channels are configured;
+  // now that they are, begin polling without a restart.
+  groupLogs.start(interaction.client)
+
+  log.info(`Log channels set up in category ${category.name} (${assignments.length} config keys filled)`)
+  await interaction.editReply({
+    embeds: [{
+      title: 'Log channels ready',
+      color: EMBED_COLOR,
+      description: lines.join('\n').slice(0, 4000),
+      fields: [{
+        name: 'Config',
+        value: `${assignments.length} channel id${assignments.length === 1 ? '' : 's'} written to config.yml. Everything is live now, no restart needed. Channels are hidden from @everyone; open them to your staff as you like.`,
+      }],
+    }],
+  })
+}
+
+// ---------------------------------------------------------------
 // router
 // ---------------------------------------------------------------
 
@@ -614,6 +716,7 @@ async function handleInteraction(interaction) {
     ping: handlePing,
     'get-member-info': handleGetMemberInfo,
     'setup-misc-roles': handleSetupMiscRoles,
+    'setup-log-channels': handleSetupLogChannels,
   }
   const handler = handlers[interaction.commandName]
   if (handler) await handler(interaction)
