@@ -6,6 +6,7 @@
 
 const config = require('./config')
 const logger = require('./logger')
+const vrc = require('./vrchatApi')
 
 const log = logger('DiscordLog')
 
@@ -38,24 +39,53 @@ function now() {
   return `<t:${Math.floor(Date.now() / 1000)}:f>`
 }
 
-function logLink(discordId, vrchatName, vrchatId) {
+function profileImage(user) {
+  return user?.profilePicOverride || user?.userIcon || user?.currentAvatarThumbnailImageUrl
+    || user?.currentAvatarImageUrl || user?.thumbnailUrl || null
+}
+
+// vrchatUser is the full profile when we have it, so the log can show the
+// avatar and the details staff care about at a glance.
+function logLink(discordId, vrchatName, vrchatId, vrchatUser = null) {
+  const fields = [
+    { name: 'VRChat', value: `[${vrchatName}](https://vrchat.com/home/user/${vrchatId})`, inline: true },
+    { name: 'User ID', value: `\`${vrchatId}\``, inline: true },
+    { name: 'When', value: now(), inline: true },
+  ]
+
+  if (vrchatUser) {
+    const joined = Date.parse(vrchatUser.date_joined || '')
+    fields.push(
+      { name: 'Trust rank', value: vrc.getTrustRank(vrchatUser).label, inline: true },
+      { name: 'VRC+', value: vrc.hasVrcPlus(vrchatUser) ? 'Yes' : 'No', inline: true },
+      { name: '18+ verified', value: vrc.isAgeVerified18Plus(vrchatUser) ? 'Yes' : 'No', inline: true },
+      { name: 'Platform', value: vrchatUser.last_platform || 'unknown', inline: true },
+      { name: 'VRChat since', value: Number.isFinite(joined) ? `<t:${Math.floor(joined / 1000)}:D>` : 'unknown', inline: true },
+      { name: 'Pronouns', value: String(vrchatUser.pronouns || 'None').slice(0, 100), inline: true },
+    )
+  }
+
+  const image = profileImage(vrchatUser)
   return send(config.logs.linkChannelId, {
     title: 'Account linked',
     color: COLORS.link,
     description: `<@${discordId}> linked to **${vrchatName}**`,
-    fields: [
-      { name: 'VRChat', value: `[${vrchatName}](https://vrchat.com/home/user/${vrchatId})`, inline: true },
-      { name: 'When', value: now(), inline: true },
-    ],
+    thumbnail: image ? { url: image } : undefined,
+    fields,
   })
 }
 
-function logUnlink(discordId, vrchatName) {
+function logUnlink(discordId, vrchatName, vrchatId = '', vrchatUser = null) {
+  const image = profileImage(vrchatUser)
   return send(config.logs.linkChannelId, {
     title: 'Account unlinked',
     color: COLORS.unlink,
     description: `<@${discordId}> unlinked from **${vrchatName}**`,
-    fields: [{ name: 'When', value: now(), inline: true }],
+    thumbnail: image ? { url: image } : undefined,
+    fields: [
+      vrchatId ? { name: 'User ID', value: `\`${vrchatId}\``, inline: true } : null,
+      { name: 'When', value: now(), inline: true },
+    ].filter(Boolean),
   })
 }
 

@@ -12,7 +12,7 @@ async function main() {
     console.log('No audit entries in window')
     return
   }
-  const b = g._buildEmbed(pick)
+  const b = await g._buildEmbed(pick)
   console.log('EMBED:', JSON.stringify(b.embed, null, 1))
   console.log('actionable:', b.actionable)
   console.log('components rows:', (b.components || []).length)

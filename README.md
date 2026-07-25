@@ -18,6 +18,7 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 - **Join request queue**: pending group join requests are posted with Accept, Deny, and Deny and Block buttons, so applications get handled from Discord.
 - **Member lookup**: `/get-member-info` builds an embed with everything the API knows about a user, including their group join date, whether they are representing the group, and staff manager notes. Right click any Discord member and pick **Apps, VRChat Profile** for the same card.
 - **Membership audit**: `/audit-members` walks the entire group and reports linked members who left, banned users who still have a Discord link, and group members who never linked, with a full text file attached.
+- **Moderation logs that point at people**: warn, kick, and ban entries ping the staff member who did it (when their Discord is linked), name the member it was against next to the user id, and show that member's VRChat avatar. Who may press the ban, kick, and unban buttons is set by `moderation.admin_role_ids` and `moderation.admin_user_ids`.
 - **Rate limit safe**: every VRChat API call is globally paced (default 1 per second, 30 per minute) and big member lists sync in small rotating batches. The bot will never hammer the VRChat API.
 
 ## Commands
@@ -38,10 +39,12 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 | `/vrc-unban user [reason]` | Admin | Lift a group ban. Paste the `usr_` id if the name will not resolve. |
 | `/vrc-bans` | Admin | Browse the group ban list, ten at a time, with Previous and Next. |
 | `/audit-members` | Admin | Cross check every group member against the Discord links and the ban list. Takes a couple of minutes on a big group. |
+| `/recheck-roles [member]` | Admin | Force a profile role recheck, for one member or a sweep, and report anything blocking the roles. |
 | `/link-panel [channel] [title] [message]` | Admin | Post a permanent embed with a Link my VRChat button. Members press it, type their name in a popup, and get their code. |
 | `/setup-misc-roles` | Admin | Create or adopt the 18+, VRC+, trust rank, repping, and tenure roles. |
 | `/setup-log-channels category` | Admin | Creates all twelve log and feed channels inside the category you pick (hidden from @everyone), writes every channel ID into `config.yml`, and starts the feeds immediately. Safe to re-run; existing channels are kept. |
 | `/ping` | Everyone | Latency, VRChat auth status, link counts. |
+| `/help` | Everyone | Everything the bot does, showing only the commands you are allowed to use. |
 
 ## Setup
 
@@ -93,8 +96,8 @@ On other platforms: `npm install` then `npm start`.
 ## Troubleshooting
 
 - **"You're not allowed to change a member of the same or higher rank" (HTTP 403)**: VRChat only lets an account edit members **below** its own highest group role; the bot having Discord admin changes nothing. In the VRChat group settings, move the bot account's role above the roles of everyone it should manage and give that role **Manage Group Member Data**. The bot pauses role edits for an affected member for 6 hours and posts one alert instead of spamming. The same rule applies to the ban and kick buttons.
-- **Profile roles are not being handed out**: run `/setup-misc-roles` (nothing happens until those roles exist), then check that the bot's Discord role sits **above** them in Server Settings, Roles. Members are processed 10 per sync pass, so a large server takes a few cycles to catch up.
-- **Ban or kick buttons do nothing**: they are administrator only, and `moderation.allow_actions_from_discord` in `config.yml` must be true.
+- **Profile roles are not being handed out**: run `/setup-misc-roles` (nothing happens until those roles exist), then check that the bot's Discord role sits **above** them in Server Settings, Roles. Members are processed 10 per sync pass, so a large server takes a few cycles to catch up. The bot rechecks this on startup and every hour and posts one alert to the alert log when something is blocking it; `/recheck-roles` runs the same check on demand.
+- **Ban or kick buttons do nothing**: `moderation.allow_actions_from_discord` in `config.yml` must be true, and you must be on the moderator list. Set `moderation.admin_role_ids` and `moderation.admin_user_ids` in `config.yml` to control exactly who can ban, kick, and unban; leave both empty and it falls back to anyone with Administrator.
 
 ## Data and logs
 

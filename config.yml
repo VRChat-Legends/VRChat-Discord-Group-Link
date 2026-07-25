@@ -73,3 +73,8 @@ moderation:
   # Let admins ban and kick in VRChat straight from Discord buttons and
   # the /vrc-ban, /vrc-kick, /vrc-unban commands
   allow_actions_from_discord: true
+  # ONLY these Discord roles and users may ban, kick, or unban in VRChat
+  # (buttons and commands). Ids go in quotes. Leave both lists empty to
+  # fall back to anyone with the Administrator permission.
+  admin_role_ids: []
+  admin_user_ids: []

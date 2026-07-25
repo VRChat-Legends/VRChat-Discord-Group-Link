@@ -4,6 +4,8 @@
 // One place so the slash commands and the log buttons behave identically,
 // including permission checks, logging, and VRChat hierarchy refusals.
 
+const { PermissionFlagsBits } = require('discord.js')
+
 const config = require('./config')
 const logger = require('./logger')
 const db = require('./db')
@@ -11,6 +13,34 @@ const vrc = require('./vrchatApi')
 const discordLog = require('./discordLog')
 
 const log = logger('VRCActions')
+
+// Who may ban, kick, or unban in VRChat. When config.yml lists roles or
+// users, that list is the only way in (Administrator alone is not enough).
+// With both lists empty it falls back to the Administrator permission.
+function canModerate(interaction) {
+  const { adminRoleIds, adminUserIds } = config.moderation
+  if (!adminRoleIds.length && !adminUserIds.length) {
+    return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+  }
+  if (adminUserIds.includes(interaction.user?.id)) return true
+
+  const roles = interaction.member?.roles
+  const held = roles?.cache ? [...roles.cache.keys()]
+    : Array.isArray(roles) ? roles
+    : Array.isArray(roles?.valueOf?.()) ? roles.valueOf()
+    : []
+  return adminRoleIds.some((id) => held.includes(id))
+}
+
+function moderatorDeniedMessage() {
+  const { adminRoleIds, adminUserIds } = config.moderation
+  if (!adminRoleIds.length && !adminUserIds.length) return 'Administrator permission required.'
+  const who = [
+    ...adminRoleIds.map((id) => `<@&${id}>`),
+    ...adminUserIds.map((id) => `<@${id}>`),
+  ].join(', ')
+  return `Only the moderators set in config.yml can do that: ${who}`
+}
 
 const ACTIONS = {
   ban: {
@@ -138,4 +168,4 @@ async function openCaseThread(message, record) {
   }
 }
 
-module.exports = { runAction, openCaseThread, caseTemplate, friendlyError }
+module.exports = { runAction, openCaseThread, caseTemplate, friendlyError, canModerate, moderatorDeniedMessage }

@@ -248,8 +248,70 @@ function noteMiscRolePermissionProblem(key, roleId, err) {
   )
 }
 
-async function removeMiscRoles(client, discordId) {
-  const guild = await client.guilds.fetch(config.discord.guildId)
+// ---------------------------------------------------------------
+// misc role health
+//
+// The single most common reason profile roles never appear is that
+// /setup-misc-roles was never run, or the bot's own role sits below the
+// roles it is meant to hand out. Check both on startup and every hour and
+// say so loudly instead of failing quietly.
+// ---------------------------------------------------------------
+
+const MISC_HEALTH_INTERVAL_MS = 60 * 60 * 1000
+let lastMiscHealthAt = 0
+let miscHealthAlerted = ''
+
+async function miscRoleHealth(client) {
+  const miscRoles = db.getMiscRoles()
+  const problems = []
+
+  if (!Object.keys(miscRoles).length) {
+    problems.push('No profile roles exist yet. Run **/setup-misc-roles** once and they start applying on the next pass.')
+  }
+
+  let guild = null
+  try {
+    guild = await client.guilds.fetch(config.discord.guildId)
+  } catch {
+    return problems
+  }
+
+  const me = guild.members.me || await guild.members.fetchMe().catch(() => null)
+  if (me) {
+    if (!me.permissions.has(PermissionFlagsBits.ManageRoles)) {
+      problems.push('I am missing the **Manage Roles** permission, so I cannot hand out any role.')
+    }
+    const myTop = me.roles.highest?.position ?? 0
+    const blocked = []
+    for (const [key, roleId] of Object.entries(miscRoles)) {
+      const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null)
+      if (!role) {
+        blocked.push(`${key} (role was deleted, re-run /setup-misc-roles)`)
+      } else if (role.position >= myTop) {
+        blocked.push(`${role.name} (sits above me)`)
+      }
+    }
+    if (blocked.length) {
+      problems.push(`Discord will not let me assign: ${blocked.join(', ')}. Drag my role **above** them in Server Settings, Roles.`)
+    }
+  }
+
+  const signature = problems.join(' | ')
+  if (problems.length) {
+    log.warn(`Profile role check: ${signature}`)
+    if (signature !== miscHealthAlerted) {
+      miscHealthAlerted = signature
+      discordLog.logAlert('Profile roles are not being applied', problems.join('\n\n'))
+    }
+  } else {
+    if (miscHealthAlerted) log.info('Profile role problems cleared.')
+    miscHealthAlerted = ''
+    log.debug(`Profile roles healthy (${Object.keys(miscRoles).length} roles).`)
+  }
+  return problems
+}
+
+async function removeMiscRoles(client, discordId) {  const guild = await client.guilds.fetch(config.discord.guildId)
   const member = await guild.members.fetch(discordId).catch(() => null)
   if (!member) return
   const miscRoles = db.getMiscRoles()
@@ -460,6 +522,11 @@ async function runCycle(client) {
 
     await updateTrackers(guild)
 
+    if (Date.now() - lastMiscHealthAt > MISC_HEALTH_INTERVAL_MS) {
+      lastMiscHealthAt = Date.now()
+      await miscRoleHealth(client).catch((err) => log.warn('profile role check failed:', err.message))
+    }
+
     // Round robin through linked users so big communities still cover
     // everyone without ever bursting the API.
     const links = db.listLinks()
@@ -490,8 +557,12 @@ async function runCycle(client) {
 
 function startLoop(client) {
   const intervalMs = config.sync.intervalSeconds * 1000
+  const linkCount = db.listLinks().length
   if (!Object.keys(db.getMiscRoles()).length) {
-    log.info('Misc roles are not set up yet; run /setup-misc-roles to enable 18+, VRC+, and trust rank roles.')
+    log.info('Misc roles are not set up yet; run /setup-misc-roles to enable 18+, VRC+, trust rank, repping, and tenure roles.')
+  } else if (linkCount) {
+    const minutes = Math.ceil((linkCount / USERS_PER_CYCLE) * config.sync.intervalSeconds / 60)
+    log.info(`Profile roles rechecked for all ${linkCount} linked member${linkCount === 1 ? '' : 's'} about every ${minutes} minute${minutes === 1 ? '' : 's'}.`)
   }
   setTimeout(() => runCycle(client), 10_000)
   const timer = setInterval(() => runCycle(client), intervalMs)
@@ -506,6 +577,7 @@ module.exports = {
   onMemberUpdate,
   applyMiscRoles,
   removeMiscRoles,
+  miscRoleHealth,
   getCachedGroupRoles,
   readStat,
   vrchatHealthy,

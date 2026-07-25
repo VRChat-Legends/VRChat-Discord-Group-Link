@@ -153,6 +153,31 @@ function userLine(userId, username) {
   return out
 }
 
+// Small profile cache so moderation embeds can show a name and an avatar
+// without spending an API call per event. Only used for actionable logs.
+const PROFILE_TTL_MS = 30 * 60 * 1000
+const profileCache = new Map()
+
+async function lookupProfile(userId) {
+  if (!/^usr_/i.test(String(userId || ''))) return null
+  const hit = profileCache.get(userId)
+  if (hit && Date.now() - hit.at < PROFILE_TTL_MS) return hit.user
+  let user = null
+  try {
+    user = await vrc.getUser(userId)
+  } catch (err) {
+    log.debug(`profile lookup failed for ${userId}: ${err.message}`)
+  }
+  profileCache.set(userId, { at: Date.now(), user })
+  if (profileCache.size > 300) profileCache.delete(profileCache.keys().next().value)
+  return user
+}
+
+function profileImage(user) {
+  return user?.profilePicOverride || user?.userIcon || user?.currentAvatarThumbnailImageUrl
+    || user?.currentAvatarImageUrl || user?.thumbnailUrl || null
+}
+
 function formatDataPayload(data) {
   if (!data || typeof data !== 'object') return null
   const lines = []
@@ -239,7 +264,7 @@ function buildModComponents(logId) {
   return rows
 }
 
-function buildEmbed(entry) {
+async function buildEmbed(entry) {
   const { eventType, category, label } = classify(entry.eventType)
   const meta = CATEGORIES[category] || CATEGORIES.default
   const createdAt = entry.created_at ? new Date(entry.created_at) : new Date()
@@ -247,6 +272,15 @@ function buildEmbed(entry) {
   const unix = Math.floor((Number.isFinite(ms) ? ms : Date.now()) / 1000)
   const target = getTarget(entry)
   const logId = crypto.randomBytes(16).toString('hex')
+
+  const actionable = ACTIONABLE_CATEGORIES.has(category) && Boolean(target.userId)
+
+  // Moderation logs are worth an extra call: it fills in the target's real
+  // display name when the audit entry only carries an id, and gives the
+  // embed their avatar. Cached for 30 minutes.
+  let targetProfile = null
+  if (actionable) targetProfile = await lookupProfile(target.userId)
+  const targetName = target.username || targetProfile?.displayName || ''
 
   const fields = [
     { name: 'Event', value: label, inline: true },
@@ -256,8 +290,8 @@ function buildEmbed(entry) {
     fields.push({ name: 'Actor', value: userLine(entry.actorId, entry.actorDisplayName).slice(0, 1024), inline: false })
   }
   // Skip the target when it is the actor acting on themselves (joins, leaves).
-  if ((target.userId || target.username) && target.userId !== entry.actorId) {
-    fields.push({ name: 'Target user', value: userLine(target.userId, target.username).slice(0, 1024), inline: false })
+  if ((target.userId || targetName) && target.userId !== entry.actorId) {
+    fields.push({ name: 'Target user', value: userLine(target.userId, targetName).slice(0, 1024), inline: false })
   }
   if (entry.description) {
     fields.push({ name: 'Description', value: String(entry.description).slice(0, 1024), inline: false })
@@ -269,18 +303,27 @@ function buildEmbed(entry) {
   }
   fields.push({ name: 'Occurred', value: `<t:${unix}:F>`, inline: true })
 
-  const actionable = ACTIONABLE_CATEGORIES.has(category) && Boolean(target.userId)
+  // Ping the staff member who took the action, when we know their Discord.
+  const actorLink = entry.actorId ? db.getLinkByVrchat(entry.actorId) : null
+  const pingId = actionable && actorLink ? actorLink.discord_id : ''
+  const content = pingId
+    ? `<@${pingId}> handled this${targetName ? ` against **${targetName}**` : ''}.`
+    : undefined
+
+  const thumbUrl = actionable ? profileImage(targetProfile) : null
 
   return {
     category,
     logId,
     actionable,
+    content,
+    mentionIds: pingId ? [pingId] : [],
     record: {
       logId,
       auditId: entry.id || '',
       eventType,
       targetId: target.userId || '',
-      targetName: target.username || '',
+      targetName,
       actorName: entry.actorDisplayName || entry.actorId || '',
       location: typeof entry.data?.location === 'string' ? entry.data.location : '',
       occurredAt: createdAt.toISOString(),
@@ -290,6 +333,7 @@ function buildEmbed(entry) {
       title: `VRChat Group ${label}`,
       color: meta.color,
       fields: fields.slice(0, 25),
+      thumbnail: thumbUrl ? { url: thumbUrl } : undefined,
       footer: { text: `Log ID: ${logId}` },
       timestamp: createdAt.toISOString(),
     },
@@ -310,7 +354,7 @@ function anyChannelConfigured() {
   return Object.values(config.groupLogs.channels).some((id) => id)
 }
 
-async function sendToChannel(channelId, payload) {
+async function sendToChannel(channelId, payload, mentionIds = []) {
   if (!clientRef || !channelId) return null
   const channel = clientRef.channels.cache.get(channelId)
     || await clientRef.channels.fetch(channelId).catch(() => null)
@@ -318,7 +362,8 @@ async function sendToChannel(channelId, payload) {
     log.warn(`Group log channel ${channelId} is missing or not a text channel`)
     return null
   }
-  return channel.send({ ...payload, allowedMentions: { parse: [] } })
+  // Only the staff member named in the content is ever pinged.
+  return channel.send({ ...payload, allowedMentions: { users: mentionIds } })
 }
 
 async function poll() {
@@ -349,11 +394,11 @@ async function poll() {
       if (seen.has(entry.id)) continue
       if (posted >= MAX_POSTS_PER_CYCLE) break
 
-      const { category, embed, components, actionable, record } = buildEmbed(entry)
+      const { category, embed, components, actionable, record, content, mentionIds } = await buildEmbed(entry)
       const channelId = channelFor(category)
       if (channelId) {
         try {
-          const message = await sendToChannel(channelId, { embeds: [embed], components })
+          const message = await sendToChannel(channelId, { content, embeds: [embed], components }, mentionIds)
           posted += 1
           if (actionable && message) {
             db.saveModerationLog({ ...record, channelId: message.channelId, messageId: message.id })

@@ -25,6 +25,7 @@ const discordLog = require('./discordLog')
 const groupLogs = require('./groupLogs')
 const feeds = require('./feeds')
 const vrcAdmin = require('./vrcAdmin')
+const vrcActions = require('./vrcActions')
 
 const log = logger('Interactions')
 
@@ -258,7 +259,7 @@ async function handleLinkVerify(interaction) {
   db.deleteLinkCode(interaction.user.id)
   db.createLink(interaction.user.id, user.id, user.displayName)
   log.info(`Linked ${interaction.user.tag} <-> ${user.displayName} (${user.id})`)
-  discordLog.logLink(interaction.user.id, user.displayName, user.id)
+  discordLog.logLink(interaction.user.id, user.displayName, user.id, user)
 
   await interaction.editReply({
     content: `Linked! **${interaction.user.username}** is now connected to **${user.displayName}**. You can change your status back. Your roles will sync within a minute.`,
@@ -299,7 +300,7 @@ async function handleUnlink(interaction) {
   db.deleteLink(interaction.user.id)
   db.deleteLinkCode(interaction.user.id)
   log.info(`Unlinked ${interaction.user.tag} from ${existing.vrchat_name || existing.vrchat_id}`)
-  discordLog.logUnlink(interaction.user.id, existing.vrchat_name || existing.vrchat_id)
+  discordLog.logUnlink(interaction.user.id, existing.vrchat_name || existing.vrchat_id, existing.vrchat_id)
   await interaction.editReply(`Unlinked from **${existing.vrchat_name || existing.vrchat_id}**.`)
 }
 
@@ -442,6 +443,76 @@ async function handleTrack(interaction) {
   await interaction.editReply(
     `Tracker created: ${channel}. The number updates automatically (Discord allows channel renames about every 6 minutes). Delete the channel to remove the tracker.`
   )
+}
+
+// ---------------------------------------------------------------
+// /help
+// ---------------------------------------------------------------
+
+const HELP_MEMBER = [
+  ['/link', 'Link your Discord to your VRChat account. You get a short code, put it in your VRChat bio, then press Verify.'],
+  ['/unlink', 'Break the link and drop the roles the bot gave you.'],
+  ['/get-member-info', 'Look up a VRChat member: trust rank, VRC+, 18+, group roles, join date, bio, and their Discord link.'],
+  ['/ping', 'Bot latency, VRChat login status, and link counts.'],
+  ['/help', 'This message.'],
+]
+
+const HELP_ADMIN_SETUP = [
+  ['/setup-misc-roles', 'Create or adopt the profile roles: 18+, VRC+, trust ranks, Repping Legends, and the tenure roles.'],
+  ['/setup-log-channels', 'Create every log and feed channel inside a category and save the IDs to config.yml.'],
+  ['/link-panel', 'Post a permanent embed with a Link my VRChat button.'],
+  ['/set-linked-role', 'Mirror a Discord role to a VRChat group role, both directions.'],
+  ['/remove-linked-role', 'Stop mirroring a Discord role.'],
+  ['/list-linked-roles', 'Show every mirrored role pair.'],
+  ['/track', 'Create a stat tracker voice channel (members, online, and friends).'],
+]
+
+const HELP_ADMIN_MOD = [
+  ['/vrc-ban', 'Ban someone from the VRChat group. The reason is kept in the alert log.'],
+  ['/vrc-kick', 'Remove someone from the group. They can request to join again.'],
+  ['/vrc-unban', 'Lift a group ban. Paste the usr_ id if the name will not resolve.'],
+  ['/vrc-bans', 'Browse the ban list ten at a time.'],
+  ['/vrc-search', 'Search group members by name.'],
+  ['/audit-members', 'Cross check the whole group against the Discord links and the ban list.'],
+  ['/recheck-roles', 'Force a profile role recheck and report anything blocking it.'],
+]
+
+function helpLines(rows) {
+  return rows.map(([name, text]) => `**${name}**\n${text}`).join('\n\n')
+}
+
+async function handleHelp(interaction) {
+  const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false
+  const isMod = vrcActions.canModerate(interaction)
+
+  const fields = [{ name: 'For everyone', value: helpLines(HELP_MEMBER), inline: false }]
+
+  if (isAdmin) {
+    fields.push({ name: 'Setup (admin)', value: helpLines(HELP_ADMIN_SETUP), inline: false })
+  }
+  if (isAdmin || isMod) {
+    fields.push({ name: 'Moderation', value: helpLines(HELP_ADMIN_MOD), inline: false })
+  }
+
+  fields.push({
+    name: 'Other things it does on its own',
+    value: [
+      'Right click any member, Apps, **VRChat Profile** to see their linked account.',
+      'Profile roles (18+, VRC+, trust rank, repping, tenure) are rechecked automatically for every linked member.',
+      'Group audit logs, group posts, and join requests are posted to the log channels, with action buttons on warns, kicks, and bans.',
+    ].join('\n'),
+    inline: false,
+  })
+
+  await interaction.reply({
+    flags: MessageFlags.Ephemeral,
+    embeds: [{
+      title: 'VRChat group link bot',
+      color: 0x8143e6,
+      description: 'Links Discord accounts to VRChat accounts and keeps roles, logs, and group moderation in sync.',
+      fields,
+    }],
+  })
 }
 
 // ---------------------------------------------------------------
@@ -1044,6 +1115,8 @@ async function handleInteraction(interaction) {
     'vrc-bans': vrcAdmin.handleVrcBans,
     'vrc-search': vrcAdmin.handleVrcSearch,
     'audit-members': vrcAdmin.handleAuditMembers,
+    'recheck-roles': vrcAdmin.handleRecheckRoles,
+    help: handleHelp,
   }
   const handler = handlers[interaction.commandName]
   if (handler) await handler(interaction)

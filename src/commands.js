@@ -30,6 +30,10 @@ function buildCommands() {
     .setName('unlink')
     .setDescription('Remove the link between your Discord and VRChat accounts')
 
+  const help = new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('What this bot can do, and every command you are allowed to use')
+
   const setLinkedRole = new SlashCommandBuilder()
     .setName('set-linked-role')
     .setDescription('Link a Discord role to a VRChat group role (two way sync)')
@@ -191,6 +195,15 @@ function buildCommands() {
     .setDescription('Cross check every group member against the Discord links and the ban list')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 
+  const recheckRoles = new SlashCommandBuilder()
+    .setName('recheck-roles')
+    .setDescription('Force a profile role recheck and report anything blocking it')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption((o) => o
+      .setName('member')
+      .setDescription('Just this member (leave empty to sweep everyone)')
+      .setRequired(false))
+
   const profileContextMenu = new ContextMenuCommandBuilder()
     .setName('VRChat Profile')
     .setType(ApplicationCommandType.User)
@@ -213,6 +226,8 @@ function buildCommands() {
     vrcBans,
     vrcSearch,
     auditMembers,
+    recheckRoles,
+    help,
     profileContextMenu,
   ].map((c) => c.toJSON())
 }

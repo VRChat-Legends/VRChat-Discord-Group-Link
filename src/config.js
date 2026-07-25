@@ -59,6 +59,12 @@ function groupLogChannels() {
   return channels
 }
 
+// Accepts a yaml list, a single id, or a comma separated string.
+function idList(raw) {
+  const items = Array.isArray(raw) ? raw : String(raw ?? '').split(',')
+  return items.map((v) => String(v ?? '').trim()).filter(Boolean)
+}
+
 const config = {
   root: ROOT,
   dataDir: path.join(ROOT, 'data'),
@@ -121,6 +127,8 @@ const config = {
   moderation: {
     caseThreads: yml.moderation?.case_threads !== false,
     allowActionsFromDiscord: yml.moderation?.allow_actions_from_discord !== false,
+    adminRoleIds: idList(yml.moderation?.admin_role_ids),
+    adminUserIds: idList(yml.moderation?.admin_user_ids),
   },
 
   log: {

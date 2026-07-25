@@ -10,6 +10,7 @@ const config = require('./config')
 const logger = require('./logger')
 const db = require('./db')
 const vrc = require('./vrchatApi')
+const sync = require('./sync')
 const actions = require('./vrcActions')
 
 const log = logger('VRCAdmin')
@@ -26,6 +27,13 @@ async function denyIfNotAdmin(interaction) {
   return true
 }
 
+// Ban, kick, and unban obey the moderator allow list in config.yml.
+async function denyIfNotModerator(interaction) {
+  if (actions.canModerate(interaction)) return false
+  await interaction.reply({ content: actions.moderatorDeniedMessage(), flags: MessageFlags.Ephemeral })
+  return true
+}
+
 function profileLink(id, name) {
   return `[${name || id}](https://vrchat.com/home/user/${id})`
 }
@@ -35,7 +43,7 @@ function profileLink(id, name) {
 // ---------------------------------------------------------------
 
 async function runActionCommand(interaction, action) {
-  if (await denyIfNotAdmin(interaction)) return
+  if (await denyIfNotModerator(interaction)) return
   await interaction.deferReply({ flags: MessageFlags.Ephemeral })
 
   const query = interaction.options.getString('user', true).trim()
@@ -280,15 +288,96 @@ async function handleAuditMembers(interaction) {
 }
 
 // ---------------------------------------------------------------
+// /recheck-roles
+// ---------------------------------------------------------------
+
+const RECHECK_CAP = 60
+
+async function handleRecheckRoles(interaction) {
+  if (await denyIfNotAdmin(interaction)) return
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const problems = await sync.miscRoleHealth(interaction.client)
+  const miscRoles = db.getMiscRoles()
+  const target = interaction.options.getUser('member')
+
+  if (!Object.keys(miscRoles).length) {
+    await interaction.editReply('No profile roles exist yet. Run **/setup-misc-roles** first, then try again.')
+    return
+  }
+
+  if (target) {
+    const link = db.getLinkByDiscord(target.id)
+    if (!link) {
+      await interaction.editReply(`<@${target.id}> has no linked VRChat account, so there is nothing to sync.`)
+      return
+    }
+
+    try {
+      await sync.syncOneUser(interaction.client, target.id)
+    } catch (err) {
+      log.warn('/recheck-roles single sync failed:', err.message)
+      await interaction.editReply(`Sync failed: ${err.vrchatMessage || err.message}`)
+      return
+    }
+
+    const member = await interaction.guild.members.fetch(target.id).catch(() => null)
+    const held = Object.entries(miscRoles)
+      .filter(([, roleId]) => member?.roles.cache.has(roleId))
+      .map(([key, roleId]) => `<@&${roleId}> (${key})`)
+
+    await interaction.editReply({
+      embeds: [{
+        title: 'Profile roles rechecked',
+        color: EMBED_COLOR,
+        fields: [
+          { name: 'Member', value: `<@${target.id}>`, inline: true },
+          { name: 'VRChat', value: profileLink(link.vrchat_id, link.vrchat_name), inline: true },
+          { name: 'Profile roles now held', value: held.join('\n') || 'None', inline: false },
+          { name: 'Blocking problems', value: problems.join('\n\n') || 'None found', inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+      }],
+    })
+    return
+  }
+
+  const links = db.listLinks()
+  const batch = links.slice(0, RECHECK_CAP)
+  let done = 0
+  let failed = 0
+  for (const link of batch) {
+    try {
+      await sync.syncOneUser(interaction.client, link.discord_id)
+      done += 1
+    } catch (err) {
+      failed += 1
+      log.warn(`/recheck-roles failed for ${link.discord_id}:`, err.message)
+    }
+  }
+
+  await interaction.editReply({
+    embeds: [{
+      title: 'Profile roles rechecked',
+      color: EMBED_COLOR,
+      fields: [
+        { name: 'Members synced', value: `${done} of ${links.length}${links.length > RECHECK_CAP ? ` (capped at ${RECHECK_CAP} per run)` : ''}`, inline: true },
+        { name: 'Failed', value: String(failed), inline: true },
+        { name: 'Blocking problems', value: problems.join('\n\n') || 'None found', inline: false },
+      ],
+      footer: { text: 'The bot also rechecks everyone automatically on its sync loop' },
+      timestamp: new Date().toISOString(),
+    }],
+  })
+}
+
+// ---------------------------------------------------------------
 // join request buttons
 // ---------------------------------------------------------------
 
 async function handleJoinRequestButton(interaction) {
   const [kind, userId] = interaction.customId.split(':')
-  if (!isAdmin(interaction)) {
-    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
-    return
-  }
+  if (await denyIfNotModerator(interaction)) return
   await interaction.deferReply({ flags: MessageFlags.Ephemeral })
 
   const accept = kind === 'jr_accept'
@@ -325,10 +414,7 @@ const ACTION_LABELS = { ban: 'Ban', kick: 'Kick', unban: 'Unban' }
 
 async function handleModActionButton(interaction) {
   const [, action, logId] = interaction.customId.split(':')
-  if (!isAdmin(interaction)) {
-    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
-    return
-  }
+  if (await denyIfNotModerator(interaction)) return
 
   const record = db.getModerationLog(logId)
   if (!record?.target_id) {
@@ -364,10 +450,7 @@ async function handleModActionButton(interaction) {
 
 async function handleModActionConfirm(interaction) {
   const [, action, logId] = interaction.customId.split(':')
-  if (!isAdmin(interaction)) {
-    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
-    return
-  }
+  if (await denyIfNotModerator(interaction)) return
   await interaction.deferUpdate()
 
   const record = db.getModerationLog(logId)
@@ -413,6 +496,7 @@ module.exports = {
   handleBansPageButton,
   handleVrcSearch,
   handleAuditMembers,
+  handleRecheckRoles,
   handleJoinRequestButton,
   handleModActionButton,
   handleModActionConfirm,
