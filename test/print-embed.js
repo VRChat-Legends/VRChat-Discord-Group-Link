@@ -18,7 +18,9 @@ async function main() {
   console.log('components rows:', (b.components || []).length)
   if (b.components) {
     console.log('menu options:', b.components[0].components[0].options.length)
-    console.log('buttons:', b.components[1].components.map((c) => c.label).join(', '))
+    for (const row of b.components.slice(1)) {
+      console.log('buttons:', row.components.map((c) => `${c.label} [${c.custom_id}]`).join(', '))
+    }
   }
 }
 

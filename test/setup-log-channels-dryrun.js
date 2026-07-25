@@ -16,6 +16,15 @@ fs.copyFileSync(CONFIG, BACKUP)
 
 const { handleInteraction } = require('../src/interactions')
 const groupLogs = require('../src/groupLogs')
+const feeds = require('../src/feeds')
+
+// The handler kicks the live feeds once channels exist. Not wanted in a
+// dry run: it would burn API calls and move the real audit watermark.
+groupLogs.start = () => {}
+feeds.start = () => {}
+
+const EXPECT_CHANNELS = 12
+const EXPECT_KEYS = 18
 
 let nextId = 5000
 const createdChannels = []
@@ -76,7 +85,7 @@ async function main() {
   try {
     const guild = makeGuild()
 
-    // Round 1: everything empty, expect 10 channels created.
+    // Round 1: everything empty, expect a channel per plan row.
     let m = mockInteraction(guild)
     await handleInteraction(m.interaction)
     console.log('Round 1 created:', createdChannels.length, 'channels')
@@ -90,14 +99,15 @@ async function main() {
     await handleInteraction(m.interaction)
     const desc2 = m.replies[m.replies.length - 1]?.embeds?.[0]?.description || ''
     const kept = (desc2.match(/Kept/g) || []).length
-    console.log(`\nRound 2: created ${createdChannels.length}, kept ${kept} (expect 0 created, 10 kept)`)
+    console.log(`\nRound 2: created ${createdChannels.length}, kept ${kept} (expect 0 created, ${EXPECT_CHANNELS} kept)`)
 
     const written = fs.readFileSync(CONFIG, 'utf8')
     const filled = (written.match(/_channel_id: "\d+"/g) || []).length
-    console.log(`config.yml keys filled: ${filled} (expect 16)`)
-    console.log(filled === 16 && createdChannels.length === 0 && kept === 10 ? '\nPASS' : '\nFAIL')
+    console.log(`config.yml keys filled: ${filled} (expect ${EXPECT_KEYS})`)
+    console.log(filled === EXPECT_KEYS && createdChannels.length === 0 && kept === EXPECT_CHANNELS ? '\nPASS' : '\nFAIL')
   } finally {
     groupLogs.stop()
+    feeds.stop()
     fs.copyFileSync(BACKUP, CONFIG)
     fs.unlinkSync(BACKUP)
     console.log('config.yml restored')

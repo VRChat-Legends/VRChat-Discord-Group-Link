@@ -18,6 +18,7 @@ const logger = require('./logger')
 const db = require('./db')
 const vrc = require('./vrchatApi')
 const discordLog = require('./discordLog')
+const vrcActions = require('./vrcActions')
 
 const log = logger('GroupLogs')
 
@@ -202,7 +203,7 @@ const MODERATION_REASONS = [
 ]
 
 function buildModComponents(logId) {
-  return [
+  const rows = [
     {
       type: 1,
       components: [{
@@ -222,6 +223,20 @@ function buildModComponents(logId) {
       ],
     },
   ]
+
+  // Live VRChat controls. Admin only and always behind a confirmation.
+  if (config.moderation.allowActionsFromDiscord) {
+    rows.push({
+      type: 1,
+      components: [
+        { type: 2, style: 4, custom_id: `mod_do:ban:${logId}`, label: 'Ban in VRChat' },
+        { type: 2, style: 1, custom_id: `mod_do:kick:${logId}`, label: 'Kick from Group' },
+        { type: 2, style: 3, custom_id: `mod_do:unban:${logId}`, label: 'Unban' },
+      ],
+    })
+  }
+
+  return rows
 }
 
 function buildEmbed(entry) {
@@ -342,6 +357,8 @@ async function poll() {
           posted += 1
           if (actionable && message) {
             db.saveModerationLog({ ...record, channelId: message.channelId, messageId: message.id })
+            const thread = await vrcActions.openCaseThread(message, record)
+            if (thread) db.setModerationThread(record.logId, thread.id)
           }
         } catch (err) {
           log.warn(`Failed to post ${entry.eventType} to ${channelId}:`, err.message)

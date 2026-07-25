@@ -2,7 +2,15 @@
 
 // Slash command definitions + guild registration.
 
-const { ChannelType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } = require('discord.js')
+const {
+  ApplicationCommandType,
+  ChannelType,
+  ContextMenuCommandBuilder,
+  PermissionFlagsBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+} = require('discord.js')
 const config = require('./config')
 const logger = require('./logger')
 
@@ -85,7 +93,7 @@ function buildCommands() {
 
   const setupMiscRoles = new SlashCommandBuilder()
     .setName('setup-misc-roles')
-    .setDescription('Create the 18+, VRC+, and trust rank roles the bot assigns to linked users')
+    .setDescription('Create the profile roles the bot assigns to linked users (18+, VRC+, trust, tenure)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 
   const setupLogChannels = new SlashCommandBuilder()
@@ -98,6 +106,95 @@ function buildCommands() {
       .addChannelTypes(ChannelType.GuildCategory)
       .setRequired(true))
 
+  const linkPanel = new SlashCommandBuilder()
+    .setName('link-panel')
+    .setDescription('Post a permanent panel with a button members press to link their VRChat account')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addChannelOption((o) => o
+      .setName('channel')
+      .setDescription('Where to post it (defaults to this channel)')
+      .addChannelTypes(ChannelType.GuildText)
+      .setRequired(false))
+    .addStringOption((o) => o
+      .setName('title')
+      .setDescription('Custom panel title')
+      .setMaxLength(200)
+      .setRequired(false))
+    .addStringOption((o) => o
+      .setName('message')
+      .setDescription('Custom panel text')
+      .setMaxLength(1500)
+      .setRequired(false))
+
+  const vrcBan = new SlashCommandBuilder()
+    .setName('vrc-ban')
+    .setDescription('Ban a user from the VRChat group')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('user')
+      .setDescription('VRChat display name or usr_ ID')
+      .setRequired(true)
+      .setMaxLength(64))
+    .addStringOption((o) => o
+      .setName('reason')
+      .setDescription('Logged in Discord (VRChat has no ban reason field)')
+      .setMaxLength(400)
+      .setRequired(false))
+
+  const vrcKick = new SlashCommandBuilder()
+    .setName('vrc-kick')
+    .setDescription('Remove a member from the VRChat group (they can rejoin)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('user')
+      .setDescription('VRChat display name or usr_ ID')
+      .setRequired(true)
+      .setMaxLength(64))
+    .addStringOption((o) => o
+      .setName('reason')
+      .setDescription('Logged in Discord')
+      .setMaxLength(400)
+      .setRequired(false))
+
+  const vrcUnban = new SlashCommandBuilder()
+    .setName('vrc-unban')
+    .setDescription('Lift a VRChat group ban')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('user')
+      .setDescription('VRChat display name or usr_ ID (paste the ID if the name will not resolve)')
+      .setRequired(true)
+      .setMaxLength(64))
+    .addStringOption((o) => o
+      .setName('reason')
+      .setDescription('Logged in Discord')
+      .setMaxLength(400)
+      .setRequired(false))
+
+  const vrcBans = new SlashCommandBuilder()
+    .setName('vrc-bans')
+    .setDescription('Browse the VRChat group ban list')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+
+  const vrcSearch = new SlashCommandBuilder()
+    .setName('vrc-search')
+    .setDescription('Search the VRChat group member list by name')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('query')
+      .setDescription('Part of a display name')
+      .setRequired(true)
+      .setMaxLength(64))
+
+  const auditMembers = new SlashCommandBuilder()
+    .setName('audit-members')
+    .setDescription('Cross check every group member against the Discord links and the ban list')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+
+  const profileContextMenu = new ContextMenuCommandBuilder()
+    .setName('VRChat Profile')
+    .setType(ApplicationCommandType.User)
+
   return [
     link,
     unlink,
@@ -109,6 +206,14 @@ function buildCommands() {
     getMemberInfo,
     setupMiscRoles,
     setupLogChannels,
+    linkPanel,
+    vrcBan,
+    vrcKick,
+    vrcUnban,
+    vrcBans,
+    vrcSearch,
+    auditMembers,
+    profileContextMenu,
   ].map((c) => c.toJSON())
 }
 
@@ -119,4 +224,4 @@ async function registerCommands(applicationId) {
   log.info('Slash commands registered for guild', config.discord.guildId)
 }
 
-module.exports = { registerCommands }
+module.exports = { registerCommands, buildCommands }

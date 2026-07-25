@@ -23,6 +23,8 @@ const vrc = require('./vrchatApi')
 const sync = require('./sync')
 const discordLog = require('./discordLog')
 const groupLogs = require('./groupLogs')
+const feeds = require('./feeds')
+const vrcAdmin = require('./vrcAdmin')
 
 const log = logger('Interactions')
 
@@ -100,13 +102,23 @@ async function issueCode(interaction, user, { viaUpdate = false } = {}) {
 }
 
 async function handleLink(interaction) {
+  const blocked = await guardExistingLink(interaction)
+  if (blocked) return
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+  await runLinkQuery(interaction, interaction.options.getString('vrchat_user', true).trim())
+}
+
+// Shared by /link and the link panel modal. Replies ephemerally with either
+// a code, a picker, or an error. The interaction must already be deferred.
+async function guardExistingLink(interaction) {
   const existing = db.getLinkByDiscord(interaction.user.id)
   if (existing) {
     await interaction.reply({
       content: `You are already linked to **${existing.vrchat_name || existing.vrchat_id}**. Run /unlink first if you want to link a different VRChat account.`,
       flags: MessageFlags.Ephemeral,
     })
-    return
+    return true
   }
 
   // A code is already pending: show it again instead of minting another.
@@ -117,13 +129,12 @@ async function handleLink(interaction) {
       components: [linkButtons()],
       flags: MessageFlags.Ephemeral,
     })
-    return
+    return true
   }
+  return false
+}
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
-
-  const query = interaction.options.getString('vrchat_user', true).trim()
-
+async function runLinkQuery(interaction, query) {
   // Direct usr_ id: no ambiguity.
   if (/^usr_[0-9a-f-]{36}$/i.test(query)) {
     let user
@@ -504,6 +515,12 @@ async function handleGetMemberInfo(interaction) {
     return
   }
 
+  await interaction.editReply({ embeds: [await memberInfoEmbed(user)] })
+}
+
+// Full profile card. Shared by /get-member-info and the right click
+// "VRChat Profile" context menu.
+async function memberInfoEmbed(user) {
   let groupMember = null
   try {
     groupMember = await vrc.getGroupMember(user.id)
@@ -544,6 +561,9 @@ async function handleGetMemberInfo(interaction) {
       { name: 'Pronouns', value: trimField(user.pronouns, 50), inline: true },
       { name: 'Discord link', value: link ? `<@${link.discord_id}>` : 'Not linked', inline: true },
       { name: 'Group roles', value: trimField(groupRoleNames), inline: false },
+      { name: 'Joined group', value: groupMember?.joinedAt ? discordTime(Date.parse(groupMember.joinedAt), 'D') : 'Not a member', inline: true },
+      { name: 'Representing', value: groupMember ? (groupMember.isRepresenting ? 'Yes' : 'No') : 'Not a member', inline: true },
+      { name: 'Manager notes', value: trimField(groupMember?.managerNotes || 'None', 500), inline: false },
       { name: 'Languages', value: trimField((user.tags || []).filter((t) => t.startsWith('language_')).map((t) => t.slice(9)).join(', ') || 'None', 200), inline: false },
       { name: 'Bio', value: trimField(user.bio), inline: false },
     ],
@@ -556,7 +576,125 @@ async function handleGetMemberInfo(interaction) {
     embed.fields.push({ name: 'Bio links', value: trimField(bioLinks.join('\n'), 500), inline: false })
   }
 
-  await interaction.editReply({ embeds: [embed] })
+  return embed
+}
+
+// ---------------------------------------------------------------
+// right click a Discord user: VRChat Profile
+// ---------------------------------------------------------------
+
+async function handleProfileContextMenu(interaction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const targetId = interaction.targetId || interaction.targetUser?.id
+  const link = db.getLinkByDiscord(targetId)
+  if (!link) {
+    await interaction.editReply(`<@${targetId}> has not linked a VRChat account yet. They can run /link to do it.`)
+    return
+  }
+
+  let user
+  try {
+    user = await vrc.getUser(link.vrchat_id)
+  } catch (err) {
+    log.warn('context menu lookup failed:', err.message)
+    await interaction.editReply('VRChat lookup failed. Try again in a minute.')
+    return
+  }
+  if (!user) {
+    await interaction.editReply(`Their linked VRChat account (\`${link.vrchat_id}\`) no longer exists.`)
+    return
+  }
+
+  await interaction.editReply({ embeds: [await memberInfoEmbed(user)] })
+}
+
+// ---------------------------------------------------------------
+// /link-panel: a permanent link button for a verification channel
+// ---------------------------------------------------------------
+
+async function handleLinkPanel(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
+    return
+  }
+
+  const channel = interaction.options.getChannel('channel') || interaction.channel
+  if (!channel?.isTextBased?.()) {
+    await interaction.reply({ content: 'Pick a text channel.', flags: MessageFlags.Ephemeral })
+    return
+  }
+
+  const title = interaction.options.getString('title')?.trim() || 'Link your VRChat account'
+  const body = interaction.options.getString('message')?.trim() || [
+    'Press the button below and type your VRChat display name.',
+    '',
+    'You will get a one time code. Put it in your VRChat **status message**, press verify, and you are done. Your group roles then stay in sync with Discord automatically.',
+  ].join('\n')
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  try {
+    await channel.send({
+      embeds: [{
+        title: title.slice(0, 256),
+        color: EMBED_COLOR,
+        description: body.slice(0, 4000),
+        footer: { text: 'VRChat-Discord Group Link' },
+      }],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('link_panel_start').setLabel('Link my VRChat').setStyle(ButtonStyle.Success)
+      )],
+      allowedMentions: { parse: [] },
+    })
+  } catch (err) {
+    log.warn('/link-panel post failed:', err.message)
+    await interaction.editReply(`Could not post there: ${err.message}`)
+    return
+  }
+
+  log.info(`Link panel posted in #${channel.name} by ${interaction.user.tag}`)
+  await interaction.editReply(`Link panel posted in <#${channel.id}>. It works forever, no need to run this again.`)
+}
+
+async function handleLinkPanelStart(interaction) {
+  const existing = db.getLinkByDiscord(interaction.user.id)
+  if (existing) {
+    await interaction.reply({
+      content: `You are already linked to **${existing.vrchat_name || existing.vrchat_id}**. Run /unlink first if you want to link a different VRChat account.`,
+      flags: MessageFlags.Ephemeral,
+    })
+    return
+  }
+
+  const pending = db.getLinkCode(interaction.user.id)
+  if (pending) {
+    await interaction.reply({
+      content: codeInstructions(pending.code, pending.vrchat_name || pending.vrchat_id, pending.expires_at, pending.vrchat_id),
+      components: [linkButtons()],
+      flags: MessageFlags.Ephemeral,
+    })
+    return
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId('link_panel_modal')
+    .setTitle('Link your VRChat account')
+    .addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('vrchat_user')
+        .setLabel('VRChat display name or usr_ id')
+        .setStyle(TextInputStyle.Short)
+        .setMaxLength(100)
+        .setRequired(true)
+    ))
+  await interaction.showModal(modal)
+}
+
+async function handleLinkPanelModal(interaction) {
+  const query = interaction.fields.getTextInputValue('vrchat_user').trim()
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+  await runLinkQuery(interaction, query)
 }
 
 // ---------------------------------------------------------------
@@ -571,6 +709,10 @@ const MISC_ROLE_DEFS = [
   { key: 'rank_user', name: 'User', color: 0x2bcf5c },
   { key: 'rank_new_user', name: 'New User', color: 0x1778ff },
   { key: 'rank_visitor', name: 'Visitor', color: 0xcccccc },
+  { key: 'repping', name: 'Repping Legends', color: 0x8143e6 },
+  { key: 'tenure_1m', name: 'Member: 1 Month', color: 0x9a9996 },
+  { key: 'tenure_6m', name: 'Member: 6 Months', color: 0xc0bfbc },
+  { key: 'tenure_1y', name: 'Member: 1 Year', color: 0xffd166 },
 ]
 
 async function handleSetupMiscRoles(interaction) {
@@ -603,7 +745,7 @@ async function handleSetupMiscRoles(interaction) {
 
   log.info('Misc roles configured')
   await interaction.editReply(
-    `${lines.join('\n')}\n\nLinked members now receive these automatically based on their VRChat profile (18+, VRC+, and their trust rank).`
+    `${lines.join('\n')}\n\nLinked members now receive these automatically based on their VRChat profile (18+, VRC+, trust rank) and their group membership (repping the group, and how long they have been a member).`
   )
 }
 
@@ -623,12 +765,18 @@ const LOG_CHANNEL_PLAN = [
   { name: 'vrc-join-requests', desc: 'Join requests and invites', keys: [{ section: 'group_logs', key: 'join_request_channel_id' }, { section: 'group_logs', key: 'invite_channel_id' }] },
   { name: 'vrc-role-logs', desc: 'VRChat group role changes', keys: [{ section: 'group_logs', key: 'role_channel_id' }] },
   { name: 'vrc-group-logs', desc: 'Posts, instances, settings, and everything else', keys: [{ section: 'group_logs', key: 'post_channel_id' }, { section: 'group_logs', key: 'instance_channel_id' }, { section: 'group_logs', key: 'group_channel_id' }, { section: 'group_logs', key: 'default_channel_id' }] },
+  { name: 'vrc-group-posts', desc: 'Group posts and announcements mirrored from VRChat', keys: [{ section: 'feeds', key: 'posts_channel_id' }] },
+  { name: 'vrc-join-queue', desc: 'Pending join requests with Accept and Deny buttons', keys: [{ section: 'feeds', key: 'join_requests_channel_id' }] },
 ]
 
 function currentChannelIdFor(entry) {
   if (entry.section === 'logs') {
     const map = { link_channel_id: 'linkChannelId', role_channel_id: 'roleChannelId', alert_channel_id: 'alertChannelId' }
     return config.logs[map[entry.key]] || ''
+  }
+  if (entry.section === 'feeds') {
+    const map = { posts_channel_id: 'postsChannelId', join_requests_channel_id: 'joinRequestsChannelId' }
+    return config.feeds[map[entry.key]] || ''
   }
   return config.groupLogs.channels[entry.key.replace(/_channel_id$/, '')] || ''
 }
@@ -692,6 +840,7 @@ async function handleSetupLogChannels(interaction) {
   // The audit log feed skips startup when no channels are configured;
   // now that they are, begin polling without a restart.
   groupLogs.start(interaction.client)
+  feeds.start(interaction.client)
 
   log.info(`Log channels set up in category ${category.name} (${assignments.length} config keys filled)`)
   await interaction.editReply({
@@ -844,10 +993,17 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isButton()) {
-    if (interaction.customId === 'link_verify') await handleLinkVerify(interaction)
-    else if (interaction.customId === 'link_cancel') await handleLinkCancel(interaction)
-    else if (interaction.customId.startsWith('mod_ban:')) await handleModBan(interaction)
-    else if (interaction.customId.startsWith('mod_custom:')) await handleModCustomButton(interaction)
+    const id = interaction.customId
+    if (id === 'link_verify') await handleLinkVerify(interaction)
+    else if (id === 'link_cancel') await handleLinkCancel(interaction)
+    else if (id === 'link_panel_start') await handleLinkPanelStart(interaction)
+    else if (id.startsWith('mod_ban:')) await handleModBan(interaction)
+    else if (id.startsWith('mod_custom:')) await handleModCustomButton(interaction)
+    else if (id.startsWith('mod_do:')) await vrcAdmin.handleModActionButton(interaction)
+    else if (id.startsWith('mod_go:')) await vrcAdmin.handleModActionConfirm(interaction)
+    else if (id === 'mod_cancel') await vrcAdmin.handleModCancel(interaction)
+    else if (id.startsWith('jr_')) await vrcAdmin.handleJoinRequestButton(interaction)
+    else if (id.startsWith('bans_page:')) await vrcAdmin.handleBansPageButton(interaction)
     return
   }
 
@@ -859,6 +1015,12 @@ async function handleInteraction(interaction) {
 
   if (interaction.isModalSubmit?.()) {
     if (interaction.customId.startsWith('mod_custom_modal:')) await handleModCustomModal(interaction)
+    else if (interaction.customId === 'link_panel_modal') await handleLinkPanelModal(interaction)
+    return
+  }
+
+  if (interaction.isUserContextMenuCommand?.()) {
+    if (interaction.commandName === 'VRChat Profile') await handleProfileContextMenu(interaction)
     return
   }
 
@@ -875,6 +1037,13 @@ async function handleInteraction(interaction) {
     'get-member-info': handleGetMemberInfo,
     'setup-misc-roles': handleSetupMiscRoles,
     'setup-log-channels': handleSetupLogChannels,
+    'link-panel': handleLinkPanel,
+    'vrc-ban': vrcAdmin.handleVrcBan,
+    'vrc-kick': vrcAdmin.handleVrcKick,
+    'vrc-unban': vrcAdmin.handleVrcUnban,
+    'vrc-bans': vrcAdmin.handleVrcBans,
+    'vrc-search': vrcAdmin.handleVrcSearch,
+    'audit-members': vrcAdmin.handleAuditMembers,
   }
   const handler = handlers[interaction.commandName]
   if (handler) await handler(interaction)

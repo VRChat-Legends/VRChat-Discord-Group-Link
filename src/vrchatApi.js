@@ -154,6 +154,79 @@ async function getGroupAuditLogs({ startDate, n = 100, offset = 0 } = {}) {
 }
 
 // ---------------------------------------------------------------
+// group members, moderation, posts, join requests
+// ---------------------------------------------------------------
+
+/**
+ * A page of group members. sort accepts VRChat's values such as
+ * 'joinedAt:desc'; search does a name match server side.
+ */
+async function getGroupMembers({ n = 100, offset = 0, sort, search, roleId } = {}) {
+  const params = new URLSearchParams()
+  params.set('n', String(Math.min(100, Math.max(1, n))))
+  params.set('offset', String(offset))
+  if (sort) params.set('sort', sort)
+  if (search) params.set('search', search)
+  if (roleId) params.set('roleId', roleId)
+  const data = await authedRequest('GET', `/groups/${encodeURIComponent(config.vrchat.groupId)}/members?${params}`)
+  return Array.isArray(data) ? data : []
+}
+
+async function getGroupBans({ n = 100, offset = 0 } = {}) {
+  const params = new URLSearchParams({ n: String(Math.min(100, Math.max(1, n))), offset: String(offset) })
+  const data = await authedRequest('GET', `/groups/${encodeURIComponent(config.vrchat.groupId)}/bans?${params}`)
+  return Array.isArray(data) ? data : []
+}
+
+function banGroupMember(userId) {
+  return authedRequest('POST', `/groups/${encodeURIComponent(config.vrchat.groupId)}/bans`, {
+    body: { userId: String(userId) },
+  })
+}
+
+function unbanGroupMember(userId) {
+  return authedRequest(
+    'DELETE',
+    `/groups/${encodeURIComponent(config.vrchat.groupId)}/bans/${encodeURIComponent(userId)}`
+  )
+}
+
+/** Remove a member from the group (a kick, not a ban). */
+function kickGroupMember(userId) {
+  return authedRequest(
+    'DELETE',
+    `/groups/${encodeURIComponent(config.vrchat.groupId)}/members/${encodeURIComponent(userId)}`
+  )
+}
+
+async function getGroupPosts({ n = 10, offset = 0 } = {}) {
+  const params = new URLSearchParams({ n: String(Math.min(100, Math.max(1, n))), offset: String(offset) })
+  const data = await authedRequest('GET', `/groups/${encodeURIComponent(config.vrchat.groupId)}/posts?${params}`)
+  if (Array.isArray(data)) return { posts: data, total: data.length }
+  return { posts: Array.isArray(data?.posts) ? data.posts : [], total: Number(data?.total || 0) }
+}
+
+async function getGroupAnnouncement() {
+  const data = await authedRequest('GET', `/groups/${encodeURIComponent(config.vrchat.groupId)}/announcement`)
+  return data && data.id ? data : null
+}
+
+async function getJoinRequests({ n = 50, offset = 0 } = {}) {
+  const params = new URLSearchParams({ n: String(Math.min(100, Math.max(1, n))), offset: String(offset) })
+  const data = await authedRequest('GET', `/groups/${encodeURIComponent(config.vrchat.groupId)}/requests?${params}`)
+  return Array.isArray(data) ? data : []
+}
+
+/** action is 'accept' or 'reject'. */
+function respondToJoinRequest(userId, action, { block = false } = {}) {
+  return authedRequest(
+    'PUT',
+    `/groups/${encodeURIComponent(config.vrchat.groupId)}/requests/${encodeURIComponent(userId)}`,
+    { body: { action, block } }
+  )
+}
+
+// ---------------------------------------------------------------
 // profile parsing helpers
 // ---------------------------------------------------------------
 
@@ -196,6 +269,15 @@ module.exports = {
   removeGroupMemberRole,
   getGroupInstances,
   getGroupAuditLogs,
+  getGroupMembers,
+  getGroupBans,
+  banGroupMember,
+  unbanGroupMember,
+  kickGroupMember,
+  getGroupPosts,
+  getGroupAnnouncement,
+  getJoinRequests,
+  respondToJoinRequest,
   getTrustRank,
   hasVrcPlus,
   isAgeVerified18Plus,

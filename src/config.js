@@ -110,6 +110,19 @@ const config = {
     channels: groupLogChannels(),
   },
 
+  // Group post and join request feeds (feeds section).
+  feeds: {
+    pollSeconds: Math.max(60, int(yml.feeds?.poll_seconds, 300)),
+    postsChannelId: String(yml.feeds?.posts_channel_id || '').trim(),
+    joinRequestsChannelId: String(yml.feeds?.join_requests_channel_id || '').trim(),
+  },
+
+  // Moderation behaviour (moderation section).
+  moderation: {
+    caseThreads: yml.moderation?.case_threads !== false,
+    allowActionsFromDiscord: yml.moderation?.allow_actions_from_discord !== false,
+  },
+
   log: {
     level: (process.env.LOG_LEVEL || 'info').toLowerCase(),
     toFile: process.env.LOG_TO_FILE !== '0',
@@ -159,8 +172,13 @@ function writeChannelIds(assignments) {
     role_channel_id: 'roleChannelId',
     alert_channel_id: 'alertChannelId',
   }
+  const feedsMap = {
+    posts_channel_id: 'postsChannelId',
+    join_requests_channel_id: 'joinRequestsChannelId',
+  }
   for (const a of assignments) {
     if (a.section === 'logs' && logsMap[a.key]) config.logs[logsMap[a.key]] = String(a.id)
+    if (a.section === 'feeds' && feedsMap[a.key]) config.feeds[feedsMap[a.key]] = String(a.id)
     if (a.section === 'group_logs') {
       const cat = a.key.replace(/_channel_id$/, '')
       if (cat in config.groupLogs.channels) config.groupLogs.channels[cat] = String(a.id)

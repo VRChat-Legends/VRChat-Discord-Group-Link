@@ -96,7 +96,26 @@ function getDb() {
       created_at TEXT NOT NULL
     );
   `)
+  migrate(db)
   return db
+}
+
+// Columns added after the first release. SQLite has no ADD COLUMN IF NOT
+// EXISTS, so check the table first.
+function migrate(handle) {
+  const wanted = {
+    moderation_logs: {
+      action_taken: "TEXT NOT NULL DEFAULT ''",
+      action_by: "TEXT NOT NULL DEFAULT ''",
+      thread_id: "TEXT NOT NULL DEFAULT ''",
+    },
+  }
+  for (const [table, columns] of Object.entries(wanted)) {
+    const have = new Set(handle.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name))
+    for (const [name, decl] of Object.entries(columns)) {
+      if (!have.has(name)) handle.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`)
+    }
+  }
 }
 
 // ---------------------------------------------------------------
@@ -286,6 +305,18 @@ function setModerationBanRequested(logId, byDiscordId) {
     .run(String(byDiscordId), String(logId))
 }
 
+function setModerationAction(logId, action, byDiscordId) {
+  getDb()
+    .prepare('UPDATE moderation_logs SET action_taken = ?, action_by = ? WHERE log_id = ?')
+    .run(String(action), String(byDiscordId), String(logId))
+}
+
+function setModerationThread(logId, threadId) {
+  getDb()
+    .prepare('UPDATE moderation_logs SET thread_id = ? WHERE log_id = ?')
+    .run(String(threadId), String(logId))
+}
+
 module.exports = {
   getDb,
   getLinkByDiscord,
@@ -314,4 +345,6 @@ module.exports = {
   getModerationLog,
   setModerationReason,
   setModerationBanRequested,
+  setModerationAction,
+  setModerationThread,
 }

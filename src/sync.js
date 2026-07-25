@@ -168,10 +168,25 @@ async function updateTrackers(guild) {
 }
 
 // ---------------------------------------------------------------
-// misc roles (18+, VRC+, trust ranks)
+// misc roles (18+, VRC+, trust ranks, repping, group tenure)
 // ---------------------------------------------------------------
 
-async function applyMiscRoles(member, vrchatUser) {
+// Tenure roles, longest first: a member only keeps the highest one earned.
+const TENURE_TIERS = [
+  { key: 'tenure_1y', days: 365 },
+  { key: 'tenure_6m', days: 182 },
+  { key: 'tenure_1m', days: 30 },
+]
+const TENURE_KEYS = TENURE_TIERS.map((t) => t.key)
+
+function tenureKeyFor(joinedAt) {
+  const ms = Date.parse(joinedAt || '')
+  if (!Number.isFinite(ms)) return null
+  const days = (Date.now() - ms) / 86_400_000
+  return TENURE_TIERS.find((t) => days >= t.days)?.key || null
+}
+
+async function applyMiscRoles(member, vrchatUser, groupMember = null) {
   const miscRoles = db.getMiscRoles()
   if (!Object.keys(miscRoles).length) return
 
@@ -183,6 +198,14 @@ async function applyMiscRoles(member, vrchatUser) {
     vrc_plus: vrc.hasVrcPlus(vrchatUser),
   }
   for (const key of RANK_KEYS) wants[key] = key === wantedRankKey
+
+  // Group member extras. Only touched when we actually have the member
+  // object, so a failed fetch never strips someone's roles.
+  if (groupMember) {
+    wants.repping = Boolean(groupMember.isRepresenting)
+    const tenureKey = tenureKeyFor(groupMember.joinedAt)
+    for (const key of TENURE_KEYS) wants[key] = key === tenureKey
+  }
 
   for (const [key, roleId] of Object.entries(miscRoles)) {
     if (!(key in wants)) continue
@@ -364,7 +387,7 @@ async function syncOneUser(client, discordId) {
     log.warn(`group member fetch failed for ${link.vrchat_id}:`, err.message)
   }
 
-  await applyMiscRoles(member, vrchatUser)
+  await applyMiscRoles(member, vrchatUser, groupMember)
   await syncLinkedRolesForMember(member, groupMember)
 }
 

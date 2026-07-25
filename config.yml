@@ -55,3 +55,21 @@ group_logs:
     instance_channel_id: ""
     # Group settings updates
     group_channel_id: ""
+
+# Extra feeds pulled from the VRChat group.
+feeds:
+  # Mirror new group posts and announcements into this channel
+  posts_channel_id: ""
+  # Post pending join requests here with Accept and Deny buttons
+  join_requests_channel_id: ""
+  # How often to check for new posts and join requests (seconds)
+  poll_seconds: 300
+
+# Moderation behaviour for the buttons on group log posts.
+moderation:
+  # Open a thread on every actionable log for evidence and discussion,
+  # pre-filled with the staff action template
+  case_threads: true
+  # Let admins ban and kick in VRChat straight from Discord buttons and
+  # the /vrc-ban, /vrc-kick, /vrc-unban commands
+  allow_actions_from_discord: true

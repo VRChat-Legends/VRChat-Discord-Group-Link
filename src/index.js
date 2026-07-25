@@ -13,6 +13,7 @@ const interactions = require('./interactions')
 const sync = require('./sync')
 const discordLog = require('./discordLog')
 const groupLogs = require('./groupLogs')
+const feeds = require('./feeds')
 
 const log = logger('Bot')
 
@@ -76,6 +77,7 @@ function main() {
 
     sync.startLoop(client)
     groupLogs.start(client)
+    feeds.start(client)
   })
 
   client.on(Events.InteractionCreate, (interaction) => {
