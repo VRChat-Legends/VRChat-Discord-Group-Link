@@ -21,8 +21,11 @@ No website, no database server, no cloud. One folder, one .env, run.bat.
 - **Moderation logs that point at people**: warn, kick, and ban entries ping the staff member who did it (when their Discord is linked), name the member it was against next to the user id, and show that member's VRChat avatar. Who may press the ban, kick, and unban buttons is set by `moderation.admin_role_ids` and `moderation.admin_user_ids`.
 - **Rate limit safe**: every VRChat API call is globally paced (default 1 per second, 30 per minute) and big member lists sync in small rotating batches. The bot will never hammer the VRChat API.
 
-## Commands
+## Simple mode
 
+Set `simple_mode: true` in `config.yml` and restart to run the bot as a plain log relay. It keeps posting group audit logs, group posts, and join requests, and it keeps the stat trackers, but nothing is clickable and nothing is linked: no `/link`, no profile roles, no role sync, no ban, kick, or unban buttons, no reason picker, and no case threads. Only `/get-member-info`, `/setup-log-channels`, `/track`, `/ping`, and `/help` get registered. Set it back to `false` and restart to turn everything on again.
+
+## Commands
 | Command | Who | What |
 | --- | --- | --- |
 | `/link vrchat_user:<name or usr_ id>` | Everyone | Start linking. Exact display names go straight to a status code; fuzzy matches show a picker so you always link the right account. Run it while linked and it asks you to `/unlink` first. |

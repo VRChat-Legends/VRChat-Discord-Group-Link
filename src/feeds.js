@@ -136,7 +136,9 @@ async function pollJoinRequests() {
       footer: { text: 'Accept or deny below' },
       timestamp: new Date().toISOString(),
     }
-    await sendTo(channelId, { embeds: [embed], components: requestComponents(userId) })
+    // Simple mode posts the request as a plain notice with no buttons.
+    const components = config.simpleMode ? [] : requestComponents(userId)
+    await sendTo(channelId, { embeds: [embed], components })
     seen.add(userId)
     posted += 1
   }

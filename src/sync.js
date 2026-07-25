@@ -458,6 +458,7 @@ async function syncOneUser(client, discordId) {
 // ---------------------------------------------------------------
 
 async function onMemberUpdate(oldMember, newMember) {
+  if (config.simpleMode) return
   const link = db.getLinkByDiscord(newMember.id)
   if (!link) return
   if (isHierarchyBlocked(link.vrchat_id)) return
@@ -522,6 +523,13 @@ async function runCycle(client) {
 
     await updateTrackers(guild)
 
+    // Simple mode keeps the tracker channels but does no linking or role
+    // work at all.
+    if (config.simpleMode) {
+      log.debug(`Cycle done in ${Date.now() - startedAt}ms (simple mode: trackers only)`)
+      return
+    }
+
     if (Date.now() - lastMiscHealthAt > MISC_HEALTH_INTERVAL_MS) {
       lastMiscHealthAt = Date.now()
       await miscRoleHealth(client).catch((err) => log.warn('profile role check failed:', err.message))
@@ -557,8 +565,13 @@ async function runCycle(client) {
 
 function startLoop(client) {
   const intervalMs = config.sync.intervalSeconds * 1000
+  if (config.simpleMode) {
+    log.info('Simple mode is on: logs only, no account linking or role sync.')
+  }
   const linkCount = db.listLinks().length
-  if (!Object.keys(db.getMiscRoles()).length) {
+  if (config.simpleMode) {
+    // nothing to report about roles
+  } else if (!Object.keys(db.getMiscRoles()).length) {
     log.info('Misc roles are not set up yet; run /setup-misc-roles to enable 18+, VRC+, trust rank, repping, and tenure roles.')
   } else if (linkCount) {
     const minutes = Math.ceil((linkCount / USERS_PER_CYCLE) * config.sync.intervalSeconds / 60)

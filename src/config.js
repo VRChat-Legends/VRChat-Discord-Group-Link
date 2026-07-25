@@ -131,6 +131,11 @@ const config = {
     adminUserIds: idList(yml.moderation?.admin_user_ids),
   },
 
+  // Simple mode: a plain log relay. No account linking, no role sync, no
+  // buttons on anything, no reasons or case threads. The bot only posts
+  // group logs, group posts, and join requests as read-only messages.
+  simpleMode: yml.simple_mode === true,
+
   log: {
     level: (process.env.LOG_LEVEL || 'info').toLowerCase(),
     toFile: process.env.LOG_TO_FILE !== '0',

@@ -208,6 +208,18 @@ function buildCommands() {
     .setName('VRChat Profile')
     .setType(ApplicationCommandType.User)
 
+  // Simple mode is a log relay: only the commands that read or set up the
+  // log channels get registered, so nothing unusable shows up in Discord.
+  if (config.simpleMode) {
+    return [
+      getMemberInfo,
+      setupLogChannels,
+      track,
+      ping,
+      help,
+    ].map((c) => c.toJSON())
+  }
+
   return [
     link,
     unlink,

@@ -4,6 +4,13 @@
 # Restart the bot after editing.
 # =============================================================
 
+# Simple mode: run the bot as a plain log relay. Nothing is clickable and
+# nothing is linked. Turning this on disables account linking, role sync,
+# the profile roles, the ban/kick/unban buttons, the reason picker, and
+# case threads. The bot only posts group logs, group posts, and join
+# requests as read-only messages.
+simple_mode: false
+
 # Log channels: the bot posts embeds about what it does. Right click a
 # channel with Developer Mode on and Copy Channel ID. Leave empty to
 # disable that log.

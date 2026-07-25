@@ -273,13 +273,15 @@ async function buildEmbed(entry) {
   const target = getTarget(entry)
   const logId = crypto.randomBytes(16).toString('hex')
 
-  const actionable = ACTIONABLE_CATEGORIES.has(category) && Boolean(target.userId)
+  // Moderation entries get the target's avatar and real display name.
+  // Simple mode keeps that, it only drops the interactive parts.
+  const enriched = ACTIONABLE_CATEGORIES.has(category) && Boolean(target.userId)
+  const actionable = enriched && !config.simpleMode
 
-  // Moderation logs are worth an extra call: it fills in the target's real
-  // display name when the audit entry only carries an id, and gives the
-  // embed their avatar. Cached for 30 minutes.
+  // Worth an extra call: it fills in the target's real display name when
+  // the audit entry only carries an id. Cached for 30 minutes.
   let targetProfile = null
-  if (actionable) targetProfile = await lookupProfile(target.userId)
+  if (enriched) targetProfile = await lookupProfile(target.userId)
   const targetName = target.username || targetProfile?.displayName || ''
 
   const fields = [
@@ -305,12 +307,12 @@ async function buildEmbed(entry) {
 
   // Ping the staff member who took the action, when we know their Discord.
   const actorLink = entry.actorId ? db.getLinkByVrchat(entry.actorId) : null
-  const pingId = actionable && actorLink ? actorLink.discord_id : ''
+  const pingId = enriched && actorLink ? actorLink.discord_id : ''
   const content = pingId
     ? `<@${pingId}> handled this${targetName ? ` against **${targetName}**` : ''}.`
     : undefined
 
-  const thumbUrl = actionable ? profileImage(targetProfile) : null
+  const thumbUrl = enriched ? profileImage(targetProfile) : null
 
   return {
     category,

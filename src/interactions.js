@@ -482,6 +482,29 @@ function helpLines(rows) {
 }
 
 async function handleHelp(interaction) {
+  if (config.simpleMode) {
+    await interaction.reply({
+      flags: MessageFlags.Ephemeral,
+      embeds: [{
+        title: 'VRChat group log bot',
+        color: 0x8143e6,
+        description: 'Simple mode is on, so this bot only mirrors the VRChat group into Discord. Nothing is clickable and no accounts are linked.',
+        fields: [
+          { name: 'What it posts', value: 'Group audit logs (warns, kicks, bans, joins, leaves, roles, and more), group posts and announcements, and new join requests, each in its own channel.', inline: false },
+          { name: 'Commands', value: helpLines([
+            ['/get-member-info', 'Look up a VRChat member: trust rank, VRC+, 18+, group roles, join date, and bio.'],
+            ['/setup-log-channels', 'Admin. Create every log channel inside a category and save the IDs.'],
+            ['/track', 'Admin. Create a stat tracker voice channel.'],
+            ['/ping', 'Bot latency and VRChat login status.'],
+            ['/help', 'This message.'],
+          ]), inline: false },
+          { name: 'Want the rest?', value: 'Set `simple_mode: false` in config.yml and restart to turn on account linking, profile roles, role sync, and the moderation buttons.', inline: false },
+        ],
+      }],
+    })
+    return
+  }
+
   const isAdmin = interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false
   const isMod = vrcActions.canModerate(interaction)
 
@@ -1057,11 +1080,27 @@ async function handleModBan(interaction) {
 // router
 // ---------------------------------------------------------------
 
+// Everything simple mode switches off. Old messages can still carry these
+// buttons, so answer them politely instead of doing nothing.
+const SIMPLE_MODE_ALLOWED = new Set(['get-member-info', 'setup-log-channels', 'track', 'ping', 'help'])
+
+async function denyInSimpleMode(interaction) {
+  if (!config.simpleMode) return false
+  if (interaction.isChatInputCommand?.() && SIMPLE_MODE_ALLOWED.has(interaction.commandName)) return false
+  await interaction.reply({
+    flags: MessageFlags.Ephemeral,
+    content: 'Simple mode is on, so this bot only posts logs. Account linking, role sync, and the moderation buttons are turned off. An admin can set `simple_mode: false` in config.yml to enable them.',
+  }).catch(() => {})
+  return true
+}
+
 async function handleInteraction(interaction) {
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === 'set-linked-role') await handleVrchatRoleAutocomplete(interaction)
     return
   }
+
+  if (await denyInSimpleMode(interaction)) return
 
   if (interaction.isButton()) {
     const id = interaction.customId
