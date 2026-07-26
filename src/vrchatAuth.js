@@ -188,8 +188,12 @@ async function followCollectingCookies(initialUrl, init, seedCookies = '') {
 // login flow
 // ---------------------------------------------------------------
 
+// Returns 'valid' when the cookies work, 'invalid' when VRChat rejects
+// them, and 'error' when the check itself failed (network trouble, 5xx).
+// On 'error' we keep trusting the cookies instead of burning a password
+// login; a real 401 later triggers refreshAuthCookies() anyway.
 async function verifySession(cookieString) {
-  if (!cookieString) return false
+  if (!cookieString) return 'invalid'
   try {
     const res = await throttledFetch(`${VRCHAT_API}/auth/user`, {
       headers: { Cookie: cookieString, 'User-Agent': UA },
@@ -198,13 +202,16 @@ async function verifySession(cookieString) {
       const body = await res.json()
       if (body && body.displayName && !body.requiresTwoFactorAuth) {
         log.info(`Session valid (logged in as ${body.displayName}).`)
-        return true
+        return 'valid'
       }
+      return 'invalid'
     }
+    if (res.status === 401 || res.status === 403) return 'invalid'
+    return 'error'
   } catch (err) {
-    log.warn('Session verification failed:', err.message)
+    log.warn('Session check failed (keeping saved cookies):', err.message)
+    return 'error'
   }
-  return false
 }
 
 async function fullLogin() {
@@ -281,37 +288,68 @@ async function login() {
   return null
 }
 
-async function doGetAuthCookies() {
-  const manual = config.vrchat.authCookie
-  if (manual) {
-    if (await verifySession(manual)) return manual
-    log.warn('VRCHAT_AUTH_COOKIE invalid or expired; trying saved session.')
+// ---------------------------------------------------------------
+// session state. Cookies are verified once per process, then trusted
+// until VRChat rejects them with a 401. Full password logins are rate
+// limited hard: VRChat treats every password login as a brand new session
+// (email notification, login rate limit), so a broken credential state
+// must never be able to hammer that endpoint.
+// ---------------------------------------------------------------
+
+let cachedCookies = null
+let authPromise = null
+let lastLoginAttemptAt = 0
+const LOGIN_COOLDOWN_MS = 5 * 60 * 1000
+
+async function loginWithCooldown() {
+  const sinceLast = Date.now() - lastLoginAttemptAt
+  if (sinceLast < LOGIN_COOLDOWN_MS) {
+    const waitS = Math.ceil((LOGIN_COOLDOWN_MS - sinceLast) / 1000)
+    log.warn(`VRChat login on cooldown for another ${waitS}s; not retrying yet.`)
+    return null
   }
-  const existing = loadCookies()
-  if (existing) {
-    if (await verifySession(existing)) return existing
-    log.info('Saved session expired. Re-authenticating...')
-  }
+  lastLoginAttemptAt = Date.now()
   return login()
 }
 
-// In-memory cookie cache so we do not hit /auth/user on every call.
-let cachedCookies = null
-let cachedCookiesAt = 0
-let authPromise = null
-const COOKIE_CACHE_TTL = 10 * 60 * 1000
+async function doGetAuthCookies() {
+  // Try the freshest saved session first, then a manually provided cookie.
+  const candidates = []
+  const saved = loadCookies()
+  if (saved) candidates.push(['Saved', saved])
+  if (config.vrchat.authCookie) candidates.push(['VRCHAT_AUTH_COOKIE', config.vrchat.authCookie])
 
-function getAuthCookies({ force = false } = {}) {
-  if (!force && cachedCookies && Date.now() - cachedCookiesAt < COOKIE_CACHE_TTL) {
-    return Promise.resolve(cachedCookies)
+  for (const [label, cookies] of candidates) {
+    const state = await verifySession(cookies)
+    if (state === 'valid') return cookies
+    // The check itself failed (network trouble): trust the cookies rather
+    // than burning a password login. A real 401 later forces a refresh.
+    if (state === 'error') return cookies
+    log.info(`${label} session is expired or incomplete.`)
+    // Drop the dead cookie file so later attempts skip straight to login
+    // instead of re-checking known-bad cookies against the API.
+    if (label === 'Saved') {
+      try {
+        fs.unlinkSync(config.vrchat.cookiePath)
+      } catch { /* already gone */ }
+    }
   }
+
+  if (candidates.length) log.info('No usable saved session. Re-authenticating...')
+  return loginWithCooldown()
+}
+
+/**
+ * Returns the current session cookies. Verifies the saved session once per
+ * process, then serves it from memory with no re-checks. Concurrent callers
+ * share one in-flight attempt.
+ */
+function getAuthCookies() {
+  if (cachedCookies) return Promise.resolve(cachedCookies)
   if (!authPromise) {
     authPromise = doGetAuthCookies()
       .then((cookies) => {
-        if (cookies) {
-          cachedCookies = cookies
-          cachedCookiesAt = Date.now()
-        }
+        if (cookies) cachedCookies = cookies
         return cookies
       })
       .finally(() => {
@@ -321,15 +359,29 @@ function getAuthCookies({ force = false } = {}) {
   return authPromise
 }
 
-// Drop cached + on-disk session so the next call forces a full re-login.
-function invalidateAuthCookies() {
+/**
+ * Called when VRChat rejected the current cookies (401): drop them and do
+ * one full re-login. Single-flight and subject to the login cooldown, so
+ * concurrent failures cannot stack login attempts.
+ */
+function refreshAuthCookies() {
   cachedCookies = null
-  cachedCookiesAt = 0
   try {
     if (fs.existsSync(config.vrchat.cookiePath)) fs.unlinkSync(config.vrchat.cookiePath)
   } catch (err) {
     log.warn('Failed to remove stale cookie file:', err.message)
   }
+  if (!authPromise) {
+    authPromise = loginWithCooldown()
+      .then((cookies) => {
+        if (cookies) cachedCookies = cookies
+        return cookies
+      })
+      .finally(() => {
+        authPromise = null
+      })
+  }
+  return authPromise
 }
 
 module.exports = {
@@ -338,5 +390,5 @@ module.exports = {
   throttle,
   throttledFetch,
   getAuthCookies,
-  invalidateAuthCookies,
+  refreshAuthCookies,
 }

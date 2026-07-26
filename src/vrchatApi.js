@@ -6,7 +6,7 @@
 
 const config = require('./config')
 const logger = require('./logger')
-const { VRCHAT_API, UA, throttledFetch, getAuthCookies, invalidateAuthCookies } = require('./vrchatAuth')
+const { VRCHAT_API, UA, throttledFetch, getAuthCookies, refreshAuthCookies } = require('./vrchatAuth')
 
 const log = logger('VRChatAPI')
 
@@ -25,9 +25,9 @@ async function authedRequest(method, apiPath, { body, retried = false } = {}) {
   })
 
   if (res.status === 401 && !retried) {
-    log.warn(`HTTP 401 on ${method} ${apiPath}; forcing re-login and retrying once`)
-    invalidateAuthCookies()
-    await getAuthCookies({ force: true })
+    log.warn(`HTTP 401 on ${method} ${apiPath}; session rejected, re-authenticating once`)
+    const fresh = await refreshAuthCookies()
+    if (!fresh) throw new Error('VRChat session expired and re-login failed or is on cooldown')
     return authedRequest(method, apiPath, { body, retried: true })
   }
 
@@ -41,9 +41,9 @@ async function authedRequest(method, apiPath, { body, retried = false } = {}) {
       msg = JSON.parse(text)?.error?.message || ''
     } catch { /* not json */ }
     if (!msg && !retried) {
-      log.warn(`HTTP 403 with no message on ${method} ${apiPath}; forcing re-login and retrying once`)
-      invalidateAuthCookies()
-      await getAuthCookies({ force: true })
+      log.warn(`HTTP 403 with no message on ${method} ${apiPath}; re-authenticating and retrying once`)
+      const fresh = await refreshAuthCookies()
+      if (!fresh) throw new Error('VRChat session expired and re-login failed or is on cooldown')
       return authedRequest(method, apiPath, { body, retried: true })
     }
     const err = new Error(`VRChat refused ${method} ${apiPath}: ${msg || 'HTTP 403'}`)
