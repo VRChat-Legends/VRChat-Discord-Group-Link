@@ -344,10 +344,17 @@ async function syncLinkedRolesForMember(member, groupMember) {
   const link = db.getLinkByDiscord(member.id)
   if (!link) return
 
+  // Group membership transitions: when a member who linked while outside
+  // the group finally joins (or rejoins), rerun the first-sight union so
+  // the roles they hold on either side get granted on the other. Union
+  // only ever grants, it never removes.
+  const wasInGroup = db.getKv(`in_group:${member.id}`, null)
+  const joinUnion = inGroup && wasInGroup !== true
+
   for (const pair of pairs) {
     const hasDiscord = member.roles.cache.has(pair.discord_role_id)
     const hasVrchat = vrchatRoleIds.has(pair.vrchat_role_id)
-    const stored = db.getRoleState(member.id, pair.discord_role_id)
+    const stored = joinUnion ? null : db.getRoleState(member.id, pair.discord_role_id)
 
     let targetDiscord = hasDiscord
     let targetVrchat = hasVrchat
@@ -415,6 +422,8 @@ async function syncLinkedRolesForMember(member, groupMember) {
 
     db.setRoleState(member.id, pair.discord_role_id, targetDiscord, targetVrchat)
   }
+
+  db.setKv(`in_group:${member.id}`, inGroup)
 }
 
 // ---------------------------------------------------------------
@@ -443,14 +452,20 @@ async function syncOneUser(client, discordId) {
   }
 
   let groupMember = null
+  let groupFetchFailed = false
   try {
     groupMember = await vrc.getGroupMember(link.vrchat_id)
   } catch (err) {
+    groupFetchFailed = true
     log.warn(`group member fetch failed for ${link.vrchat_id}:`, err.message)
   }
 
   await applyMiscRoles(member, vrchatUser, groupMember)
-  await syncLinkedRolesForMember(member, groupMember)
+  // A failed fetch means membership is UNKNOWN, not "left the group":
+  // running the linked role sync on it would read every VRChat role as
+  // missing and strip the Discord side over a network blip. Skip it; a
+  // real 404 comes back as null without throwing and syncs normally.
+  if (!groupFetchFailed) await syncLinkedRolesForMember(member, groupMember)
 }
 
 // ---------------------------------------------------------------

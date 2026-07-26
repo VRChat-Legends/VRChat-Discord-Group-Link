@@ -26,6 +26,7 @@ const groupLogs = require('./groupLogs')
 const feeds = require('./feeds')
 const vrcAdmin = require('./vrcAdmin')
 const vrcActions = require('./vrcActions')
+const setupBackup = require('./setupBackup')
 
 const log = logger('Interactions')
 
@@ -35,6 +36,26 @@ function isAdmin(interaction) {
   return Boolean(
     interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
     || interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)
+  )
+}
+
+// The setup commands and their restore/restart buttons are locked to the
+// moderators configured in config.yml (moderation.admin_role_ids and
+// admin_user_ids). With both lists empty they fall back to the
+// Administrator permission, same as the VRChat action buttons.
+async function denySetupUnlessAuthorized(interaction) {
+  if (vrcActions.canModerate(interaction)) return false
+  await interaction.reply({ content: vrcActions.moderatorDeniedMessage(), flags: MessageFlags.Ephemeral }).catch(() => {})
+  return true
+}
+
+// Restore-or-restart prompt shared by both setup commands.
+function setupChoiceButtons(prefix, suffix = '') {
+  const tail = suffix ? `:${suffix}` : ''
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`${prefix}:restore${tail}`).setLabel('Restore from backup').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`${prefix}:fresh${tail}`).setLabel('Start fresh (delete old)').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`${prefix}:cancel${tail}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary),
   )
 }
 
@@ -809,19 +830,34 @@ const MISC_ROLE_DEFS = [
   { key: 'tenure_1y', name: 'Member: 1 Year', color: 0xffd166 },
 ]
 
-async function handleSetupMiscRoles(interaction) {
-  if (!isAdmin(interaction)) {
-    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
-    return
+// Backup entries that would rescue keys the database no longer resolves
+// to a live role (wiped database, or the id points at a deleted role).
+function restorableMiscRoles(guild) {
+  const existing = db.getMiscRoles()
+  const saved = setupBackup.savedMiscRoles()
+  const out = []
+  for (const def of MISC_ROLE_DEFS) {
+    const cur = existing[def.key]
+    if (cur && guild.roles.cache.get(cur)) continue
+    const savedId = saved[def.key]
+    if (savedId && guild.roles.cache.get(savedId)) out.push({ key: def.key, name: def.name, id: savedId })
   }
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+  return out
+}
 
+// The create-or-adopt pass, shared by the command and the restore and
+// restart buttons. excludeIds keeps a just-deleted role from being
+// re-adopted before the cache catches up.
+async function runMiscRoleSetup(interaction, { intro = '', excludeIds = null } = {}) {
+  const skip = excludeIds || new Set()
   const existing = db.getMiscRoles()
   const lines = []
   for (const def of MISC_ROLE_DEFS) {
-    let role = existing[def.key] ? interaction.guild.roles.cache.get(existing[def.key]) : null
+    let role = existing[def.key] && !skip.has(existing[def.key])
+      ? interaction.guild.roles.cache.get(existing[def.key])
+      : null
     if (!role) {
-      role = interaction.guild.roles.cache.find((r) => r.name === def.name && !r.managed) || null
+      role = interaction.guild.roles.cache.find((r) => r.name === def.name && !r.managed && !skip.has(r.id)) || null
     }
     if (!role) {
       role = await interaction.guild.roles.create({
@@ -836,11 +872,82 @@ async function handleSetupMiscRoles(interaction) {
     }
     db.setMiscRole(def.key, role.id)
   }
+  setupBackup.saveMiscRoles(db.getMiscRoles())
 
   log.info('Misc roles configured')
-  await interaction.editReply(
-    `${lines.join('\n')}\n\nLinked members now receive these automatically based on their VRChat profile (18+, VRC+, trust rank) and their group membership (repping the group, and how long they have been a member).`
-  )
+  await interaction.editReply({
+    content: [
+      intro,
+      lines.join('\n'),
+      'Linked members now receive these automatically based on their VRChat profile (18+, VRC+, trust rank) and their group membership (repping the group, and how long they have been a member). The role ids are backed up to data/setup-backup.json.',
+    ].filter(Boolean).join('\n\n'),
+    components: [],
+  })
+}
+
+async function handleSetupMiscRoles(interaction) {
+  if (await denySetupUnlessAuthorized(interaction)) return
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const restorable = restorableMiscRoles(interaction.guild)
+  if (restorable.length) {
+    await interaction.editReply({
+      content: [
+        `The database is missing ${restorable.length} profile role${restorable.length === 1 ? '' : 's'} that the backup file still knows: ${restorable.map((r) => `<@&${r.id}> (${r.name})`).join(', ')}`,
+        '',
+        '**Restore from backup** reconnects those existing roles; members keep them.',
+        '**Start fresh** deletes the old roles and creates new ones; members get them back on their next sync pass.',
+      ].join('\n'),
+      components: [setupChoiceButtons('setupmisc')],
+    })
+    return
+  }
+
+  await runMiscRoleSetup(interaction)
+}
+
+// Restore and Start fresh buttons under /setup-misc-roles.
+async function handleMiscSetupChoice(interaction) {
+  if (await denySetupUnlessAuthorized(interaction)) return
+  const choice = interaction.customId.split(':')[1]
+  if (choice === 'cancel') {
+    await interaction.update({ content: 'Setup cancelled. Nothing changed.', components: [] })
+    return
+  }
+  await interaction.deferUpdate()
+
+  if (choice === 'restore') {
+    const restorable = restorableMiscRoles(interaction.guild)
+    for (const r of restorable) db.setMiscRole(r.key, r.id)
+    log.info(`Misc roles restored from backup (${restorable.length} ids)`)
+    await runMiscRoleSetup(interaction, {
+      intro: `Restored ${restorable.length} role id${restorable.length === 1 ? '' : 's'} from the backup.`,
+    })
+    return
+  }
+
+  // Start fresh: delete every role the database or the backup still
+  // points at, then create the whole set anew.
+  const ids = new Set([
+    ...Object.values(db.getMiscRoles()),
+    ...Object.values(setupBackup.savedMiscRoles()),
+  ].filter(Boolean))
+  let deleted = 0
+  for (const id of ids) {
+    const role = interaction.guild.roles.cache.get(id)
+    if (!role || role.managed) continue
+    try {
+      await role.delete('Misc role setup restart')
+      deleted++
+    } catch (err) {
+      log.warn(`could not delete role ${id}:`, err.message)
+    }
+  }
+  log.info(`Misc role restart: deleted ${deleted} old roles`)
+  await runMiscRoleSetup(interaction, {
+    intro: `Deleted ${deleted} old role${deleted === 1 ? '' : 's'}.`,
+    excludeIds: ids,
+  })
 }
 
 // ---------------------------------------------------------------
@@ -875,19 +982,23 @@ function currentChannelIdFor(entry) {
   return config.groupLogs.channels[entry.key.replace(/_channel_id$/, '')] || ''
 }
 
-async function handleSetupLogChannels(interaction) {
-  if (!interaction.guild) {
-    await interaction.reply({ content: 'Run this inside the server.', flags: MessageFlags.Ephemeral })
-    return
+// Backup entries that would rescue config keys no longer pointing at a
+// live channel (wiped config.yml, or the channel id is stale).
+function restorableChannelAssignments(guild) {
+  const out = []
+  for (const a of setupBackup.savedChannelAssignments()) {
+    const cur = currentChannelIdFor(a)
+    if (cur && guild.channels.cache.get(cur)) continue
+    if (guild.channels.cache.get(a.id)) out.push(a)
   }
-  const category = interaction.options.getChannel('category', true)
-  if (category.type !== ChannelType.GuildCategory) {
-    await interaction.reply({ content: 'Pick a channel **category**, not a regular channel.', flags: MessageFlags.Ephemeral })
-    return
-  }
+  return out
+}
 
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
-
+// The create-or-keep pass, shared by the command and the restore and
+// restart buttons. excludeIds keeps a just-deleted channel from being
+// re-adopted by name before the cache catches up.
+async function runLogChannelSetup(interaction, category, { intro = '', excludeIds = null } = {}) {
+  const skip = excludeIds || new Set()
   const lines = []
   const assignments = []
 
@@ -895,7 +1006,7 @@ async function handleSetupLogChannels(interaction) {
     // Keys still needing a channel (unset, or pointing at a deleted one).
     const needy = plan.keys.filter((k) => {
       const cur = currentChannelIdFor(k)
-      return !cur || !interaction.guild.channels.cache.get(cur)
+      return !cur || skip.has(cur) || !interaction.guild.channels.cache.get(cur)
     })
     if (!needy.length) {
       const keptId = currentChannelIdFor(plan.keys[0])
@@ -905,7 +1016,7 @@ async function handleSetupLogChannels(interaction) {
 
     // Reuse a same-named channel already in the category before creating.
     let channel = interaction.guild.channels.cache.find(
-      (c) => c.parentId === category.id && c.type === ChannelType.GuildText && c.name === plan.name
+      (c) => c.parentId === category.id && c.type === ChannelType.GuildText && c.name === plan.name && !skip.has(c.id)
     ) || null
     if (!channel) {
       channel = await interaction.guild.channels.create({
@@ -930,23 +1041,113 @@ async function handleSetupLogChannels(interaction) {
   }
 
   if (assignments.length) config.writeChannelIds(assignments)
+  setupBackup.saveChannels()
 
   // The audit log feed skips startup when no channels are configured;
   // now that they are, begin polling without a restart.
   groupLogs.start(interaction.client)
   feeds.start(interaction.client)
 
-  log.info(`Log channels set up in category ${category.name} (${assignments.length} config keys filled)`)
+  log.info(`Log channels set up in category ${category.name || category.id} (${assignments.length} config keys filled)`)
   await interaction.editReply({
+    content: '',
     embeds: [{
       title: 'Log channels ready',
       color: EMBED_COLOR,
-      description: lines.join('\n').slice(0, 4000),
+      description: [intro, lines.join('\n')].filter(Boolean).join('\n\n').slice(0, 4000),
       fields: [{
         name: 'Config',
-        value: `${assignments.length} channel id${assignments.length === 1 ? '' : 's'} written to config.yml. Everything is live now, no restart needed. Channels are hidden from @everyone; open them to your staff as you like.`,
+        value: `${assignments.length} channel id${assignments.length === 1 ? '' : 's'} written to config.yml and backed up to data/setup-backup.json. Everything is live now, no restart needed. Channels are hidden from @everyone; open them to your staff as you like.`,
       }],
     }],
+    components: [],
+  })
+}
+
+async function handleSetupLogChannels(interaction) {
+  if (!interaction.guild) {
+    await interaction.reply({ content: 'Run this inside the server.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  if (await denySetupUnlessAuthorized(interaction)) return
+  const category = interaction.options.getChannel('category', true)
+  if (category.type !== ChannelType.GuildCategory) {
+    await interaction.reply({ content: 'Pick a channel **category**, not a regular channel.', flags: MessageFlags.Ephemeral })
+    return
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const restorable = restorableChannelAssignments(interaction.guild)
+  if (restorable.length) {
+    const channels = [...new Set(restorable.map((a) => a.id))]
+    await interaction.editReply({
+      content: [
+        `config.yml is missing ${restorable.length} channel id${restorable.length === 1 ? '' : 's'} that the backup file still knows, and the channel${channels.length === 1 ? ' exists' : 's exist'}: ${channels.map((id) => `<#${id}>`).join(', ')}`,
+        '',
+        '**Restore from backup** writes those ids back into config.yml and keeps the channels, history and all.',
+        '**Start fresh** deletes the old log channels and creates new empty ones.',
+      ].join('\n'),
+      components: [setupChoiceButtons('setuplog', category.id)],
+    })
+    return
+  }
+
+  await runLogChannelSetup(interaction, category)
+}
+
+// Restore and Start fresh buttons under /setup-log-channels.
+async function handleLogSetupChoice(interaction) {
+  if (await denySetupUnlessAuthorized(interaction)) return
+  const [, choice, categoryId] = interaction.customId.split(':')
+  if (choice === 'cancel') {
+    await interaction.update({ content: 'Setup cancelled. Nothing changed.', components: [] })
+    return
+  }
+  const category = interaction.guild?.channels.cache.get(categoryId)
+  if (!category || category.type !== ChannelType.GuildCategory) {
+    await interaction.update({ content: 'That category is gone. Run /setup-log-channels again and pick a new one.', components: [] })
+    return
+  }
+  await interaction.deferUpdate()
+
+  if (choice === 'restore') {
+    const restorable = restorableChannelAssignments(interaction.guild)
+    if (restorable.length) config.writeChannelIds(restorable)
+    log.info(`Log channels restored from backup (${restorable.length} config keys)`)
+    await runLogChannelSetup(interaction, category, {
+      intro: `Restored ${restorable.length} channel id${restorable.length === 1 ? '' : 's'} from the backup; anything still missing was created new.`,
+    })
+    return
+  }
+
+  // Start fresh: delete every channel config.yml or the backup points at,
+  // clear the config keys, then create the full set anew.
+  const ids = new Set()
+  for (const plan of LOG_CHANNEL_PLAN) {
+    for (const k of plan.keys) {
+      const cur = currentChannelIdFor(k)
+      if (cur) ids.add(cur)
+    }
+  }
+  for (const a of setupBackup.savedChannelAssignments()) ids.add(a.id)
+
+  let deleted = 0
+  for (const id of ids) {
+    const channel = interaction.guild.channels.cache.get(id)
+    if (!channel || channel.type !== ChannelType.GuildText) continue
+    try {
+      await channel.delete('Log channel setup restart')
+      deleted++
+    } catch (err) {
+      log.warn(`could not delete channel ${id}:`, err.message)
+    }
+  }
+  config.writeChannelIds(LOG_CHANNEL_PLAN.flatMap((p) => p.keys.map((k) => ({ ...k, id: '' }))))
+  log.info(`Log channel restart: deleted ${deleted} old channels`)
+  await runLogChannelSetup(interaction, category, {
+    intro: `Deleted ${deleted} old channel${deleted === 1 ? '' : 's'}.`,
+    excludeIds: ids,
   })
 }
 
@@ -1087,6 +1288,8 @@ const SIMPLE_MODE_ALLOWED = new Set(['get-member-info', 'setup-log-channels', 't
 async function denyInSimpleMode(interaction) {
   if (!config.simpleMode) return false
   if (interaction.isChatInputCommand?.() && SIMPLE_MODE_ALLOWED.has(interaction.commandName)) return false
+  // /setup-log-channels works in simple mode, so its buttons must too.
+  if (interaction.isButton?.() && String(interaction.customId || '').startsWith('setuplog:')) return false
   await interaction.reply({
     flags: MessageFlags.Ephemeral,
     content: 'Simple mode is on, so this bot only posts logs. Account linking, role sync, and the moderation buttons are turned off. An admin can set `simple_mode: false` in config.yml to enable them.',
@@ -1114,6 +1317,8 @@ async function handleInteraction(interaction) {
     else if (id === 'mod_cancel') await vrcAdmin.handleModCancel(interaction)
     else if (id.startsWith('jr_')) await vrcAdmin.handleJoinRequestButton(interaction)
     else if (id.startsWith('bans_page:')) await vrcAdmin.handleBansPageButton(interaction)
+    else if (id.startsWith('setuplog:')) await handleLogSetupChoice(interaction)
+    else if (id.startsWith('setupmisc:')) await handleMiscSetupChoice(interaction)
     return
   }
 
