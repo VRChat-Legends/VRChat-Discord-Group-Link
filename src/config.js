@@ -93,6 +93,18 @@ const config = {
     // to once per ~6 minutes per channel by Discord itself; the tracker
     // module enforces that on top of this interval.
     intervalSeconds: Math.max(60, int(process.env.SYNC_INTERVAL_SECONDS, 300)),
+    // The whole member list is cached, one VRChat call per 100 members, so every linked member can be checked every cycle.
+    rosterRefreshSeconds: Math.max(120, int(yml.sync?.roster_refresh_seconds, 900)),
+    rosterMaxMembers: Math.max(100, int(yml.sync?.roster_max_members, 25000)),
+    // Trust rank, VRC+, and 18+ cost one call each, so they refresh on a rotation and are cached in between.
+    profilesPerCycle: Math.max(0, int(yml.sync?.profiles_per_cycle, 12)),
+    profileTtlHours: Math.max(1, int(yml.sync?.profile_ttl_hours, 12)),
+    // Group events queue an immediate sync instead of waiting for the member's turn on the rotation.
+    eventDrainSeconds: Math.max(2, int(yml.sync?.event_drain_seconds, 5)),
+    // Which side wins when both changed against each other in one window.
+    conflictWinner: String(yml.sync?.conflict_winner || 'discord').toLowerCase() === 'vrchat' ? 'vrchat' : 'discord',
+    // First sight of a member grants the role held on either side; off makes stored state the only thing that grants.
+    grantOnFirstSight: yml.sync?.grant_on_first_sight !== false,
   },
 
   // One-time link codes: how long a /link code stays valid.

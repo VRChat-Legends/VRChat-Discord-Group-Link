@@ -11,6 +11,7 @@ const logger = require('./logger')
 const db = require('./db')
 const vrc = require('./vrchatApi')
 const sync = require('./sync')
+const roster = require('./roster')
 const actions = require('./vrcActions')
 
 const log = logger('VRCAdmin')
@@ -148,9 +149,14 @@ async function handleVrcSearch(interaction) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral })
 
   const query = interaction.options.getString('query', true).trim()
+  if (query.length < 3) {
+    await interaction.editReply('VRChat needs at least three characters to search the member list.')
+    return
+  }
+
   let members
   try {
-    members = await vrc.getGroupMembers({ search: query, n: 10 })
+    members = await vrc.searchGroupMembers(query, { n: 10 })
   } catch (err) {
     log.warn('/vrc-search failed:', err.message)
     await interaction.editReply(`Search failed: ${err.vrchatMessage || err.message}`)
@@ -182,6 +188,222 @@ async function handleVrcSearch(interaction) {
       color: EMBED_COLOR,
       description: lines.join('\n\n').slice(0, 4000),
       footer: { text: `${members.length} match${members.length === 1 ? '' : 'es'}` },
+      timestamp: new Date().toISOString(),
+    }],
+  })
+}
+
+// ---------------------------------------------------------------
+// /vrc-role-members
+// ---------------------------------------------------------------
+
+const ROLE_MEMBER_PREVIEW = 25
+
+async function handleVrcRoleMembers(interaction) {
+  if (await denyIfNotAdmin(interaction)) return
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const roleId = interaction.options.getString('vrchat_role', true)
+  let roleName = roleId
+  try {
+    const roles = await sync.getCachedGroupRoles()
+    roleName = roles.find((r) => r.id === roleId)?.name || roleId
+  } catch { /* the id alone is enough to answer */ }
+
+  // The cached roster answers for free; the API is only asked when it has not loaded, and then for one page.
+  let members = []
+  let truncated = false
+  try {
+    if (roster.isLoaded()) {
+      members = roster.withRole(roleId)
+    } else {
+      members = await vrc.getGroupMembers({ roleId, n: 100 })
+      truncated = members.length >= 100
+    }
+  } catch (err) {
+    log.warn('/vrc-role-members failed:', err.message)
+    await interaction.editReply(`Could not read the member list: ${err.vrchatMessage || err.message}`)
+    return
+  }
+
+  const lines = members.slice(0, ROLE_MEMBER_PREVIEW).map((m) => {
+    const id = m.userId || m.user?.id || 'unknown'
+    const name = m.user?.displayName || id
+    const link = db.getLinkByVrchat(id)
+    return `${profileLink(id, name)}${link ? ` | <@${link.discord_id}>` : ''}`
+  })
+
+  const linkedCount = members.filter((m) => db.getLinkByVrchat(m.userId || m.user?.id || '')).length
+  const files = []
+  if (members.length > ROLE_MEMBER_PREVIEW) {
+    const full = members.map((m) => {
+      const id = m.userId || m.user?.id || '?'
+      const link = db.getLinkByVrchat(id)
+      return `${m.user?.displayName || '?'} | ${id} | discord ${link?.discord_id || 'not linked'}`
+    })
+    files.push(new AttachmentBuilder(Buffer.from(full.join('\n'), 'utf8'), { name: 'role-members.txt' }))
+  }
+
+  await interaction.editReply({
+    embeds: [{
+      title: `VRChat role: ${roleName}`.slice(0, 256),
+      color: EMBED_COLOR,
+      description: lines.join('\n').slice(0, 4000) || 'Nobody holds this role.',
+      fields: [
+        { name: 'Holders', value: `${members.length}${truncated ? '+' : ''}`, inline: true },
+        { name: 'Linked to Discord', value: String(linkedCount), inline: true },
+      ],
+      footer: {
+        text: members.length > ROLE_MEMBER_PREVIEW
+          ? `Showing ${ROLE_MEMBER_PREVIEW} of ${members.length}; full list attached`
+          : roster.isLoaded() ? `From the cached member list, ${Math.round(roster.ageMs() / 1000)}s old` : 'Live from VRChat',
+      },
+      timestamp: new Date().toISOString(),
+    }],
+    files,
+  })
+}
+
+// ---------------------------------------------------------------
+// /vrc-invite
+// ---------------------------------------------------------------
+
+async function handleVrcInvite(interaction) {
+  if (await denyIfNotModerator(interaction)) return
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const query = interaction.options.getString('user', true).trim()
+  let user = null
+  try {
+    user = await vrc.resolveUser(query)
+  } catch (err) {
+    log.warn('/vrc-invite lookup failed:', err.message)
+  }
+
+  const targetId = user?.id || (/^usr_/.test(query) ? query : null)
+  if (!targetId) {
+    await interaction.editReply(`No VRChat user found for **${query}**. Paste the full \`usr_...\` id if the name does not resolve.`)
+    return
+  }
+
+  if (roster.get(targetId)) {
+    await interaction.editReply(`**${user?.displayName || targetId}** is already in the group.`)
+    return
+  }
+
+  try {
+    await vrc.createGroupInvite(targetId)
+  } catch (err) {
+    log.warn('/vrc-invite failed:', err.message)
+    await interaction.editReply(actions.friendlyError(err))
+    return
+  }
+
+  const name = user?.displayName || targetId
+  log.info(`Invited ${name} (${targetId}) to the group, by ${interaction.user.tag}`)
+  await interaction.editReply(`Group invite sent to **${name}**.`)
+}
+
+// ---------------------------------------------------------------
+// /vrc-post
+// ---------------------------------------------------------------
+
+async function handleVrcPost(interaction) {
+  if (await denyIfNotModerator(interaction)) return
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const title = interaction.options.getString('title', true).trim()
+  const text = interaction.options.getString('text', true).trim()
+  const visibility = interaction.options.getString('visibility') || 'group'
+  const notify = interaction.options.getBoolean('notify') ?? false
+
+  try {
+    await vrc.createGroupPost({ title, text, visibility, sendNotification: notify })
+  } catch (err) {
+    log.warn('/vrc-post failed:', err.message)
+    await interaction.editReply(actions.friendlyError(err))
+    return
+  }
+
+  log.info(`Group post created by ${interaction.user.tag}: ${title}`)
+  await interaction.editReply({
+    content: 'Posted to the VRChat group.',
+    embeds: [{
+      title: title.slice(0, 256),
+      color: EMBED_COLOR,
+      description: text.slice(0, 4000),
+      fields: [
+        { name: 'Visibility', value: visibility === 'public' ? 'Public' : 'Group members', inline: true },
+        { name: 'Notification', value: notify ? 'Sent' : 'None', inline: true },
+        { name: 'By', value: `<@${interaction.user.id}>`, inline: true },
+      ],
+      timestamp: new Date().toISOString(),
+    }],
+  })
+}
+
+// ---------------------------------------------------------------
+// /group-info
+// ---------------------------------------------------------------
+
+// Anyone can run this, so the two reads behind it are shared for a minute rather than spent per invocation.
+const GROUP_INFO_TTL_MS = 60_000
+let groupInfoCache = { at: 0, group: null, instances: [] }
+
+async function readGroupInfo() {
+  if (Date.now() - groupInfoCache.at < GROUP_INFO_TTL_MS) return groupInfoCache
+  const group = await vrc.getGroup()
+  let instances = []
+  try {
+    instances = await vrc.getGroupInstances()
+  } catch { /* instances are a bonus, not the point */ }
+  groupInfoCache = { at: Date.now(), group, instances }
+  return groupInfoCache
+}
+
+async function handleGroupInfo(interaction) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  let group = null
+  let instances = []
+  try {
+    ({ group, instances } = await readGroupInfo())
+  } catch (err) {
+    log.warn('/group-info failed:', err.message)
+    await interaction.editReply(`Could not read the group: ${err.vrchatMessage || err.message}`)
+    return
+  }
+  if (!group) {
+    await interaction.editReply('VRChat did not return the group. Check VRCHAT_GROUP_ID in .env.')
+    return
+  }
+
+  const inInstances = instances.reduce((sum, i) => sum + Number(i?.memberCount ?? i?.nUsers ?? 0), 0)
+
+  const created = Date.parse(group.createdAt || '')
+  const fields = [
+    { name: 'Members', value: String(group.memberCount ?? 'unknown'), inline: true },
+    { name: 'Linked to Discord', value: String(db.countLinks()), inline: true },
+    { name: 'Online now', value: `${inInstances} in ${instances.length} instance${instances.length === 1 ? '' : 's'}`, inline: true },
+    { name: 'Short code', value: group.shortCode ? `${group.shortCode}.${group.discriminator}` : 'unknown', inline: true },
+    { name: 'Join type', value: String(group.joinState || 'unknown'), inline: true },
+    { name: 'Roles', value: String(group.roles?.length ?? (group.numRoles ?? 'unknown')), inline: true },
+  ]
+  if (Number.isFinite(created)) {
+    fields.push({ name: 'Created', value: `<t:${Math.floor(created / 1000)}:D>`, inline: true })
+  }
+  if (group.description) {
+    fields.push({ name: 'Description', value: String(group.description).slice(0, 1024), inline: false })
+  }
+
+  await interaction.editReply({
+    embeds: [{
+      title: String(group.name || 'VRChat group').slice(0, 256),
+      url: group.id ? `https://vrchat.com/home/group/${group.id}` : undefined,
+      color: EMBED_COLOR,
+      fields,
+      thumbnail: group.iconUrl ? { url: group.iconUrl } : undefined,
+      image: group.bannerUrl ? { url: group.bannerUrl } : undefined,
       timestamp: new Date().toISOString(),
     }],
   })
@@ -291,8 +513,6 @@ async function handleAuditMembers(interaction) {
 // /recheck-roles
 // ---------------------------------------------------------------
 
-const RECHECK_CAP = 60
-
 async function handleRecheckRoles(interaction) {
   if (await denyIfNotAdmin(interaction)) return
   await interaction.deferReply({ flags: MessageFlags.Ephemeral })
@@ -301,8 +521,8 @@ async function handleRecheckRoles(interaction) {
   const miscRoles = db.getMiscRoles()
   const target = interaction.options.getUser('member')
 
-  if (!Object.keys(miscRoles).length) {
-    await interaction.editReply('No profile roles exist yet. Run **/setup-misc-roles** first, then try again.')
+  if (!Object.keys(miscRoles).length && !db.listLinkedRoles().length) {
+    await interaction.editReply('Nothing is set up to sync yet. Run **/setup-misc-roles** or **/set-linked-role** first, then try again.')
     return
   }
 
@@ -313,8 +533,10 @@ async function handleRecheckRoles(interaction) {
       return
     }
 
+    let result
     try {
-      await sync.syncOneUser(interaction.client, target.id)
+      // A one member recheck is worth the calls: fresh profile and a direct membership answer instead of cached ones.
+      result = await sync.syncOneUser(interaction.client, target.id, { verify: true, refreshProfile: true })
     } catch (err) {
       log.warn('/recheck-roles single sync failed:', err.message)
       await interaction.editReply(`Sync failed: ${err.vrchatMessage || err.message}`)
@@ -325,15 +547,21 @@ async function handleRecheckRoles(interaction) {
     const held = Object.entries(miscRoles)
       .filter(([, roleId]) => member?.roles.cache.has(roleId))
       .map(([key, roleId]) => `<@&${roleId}> (${key})`)
+    const linked = db.listLinkedRoles()
+      .filter((p) => member?.roles.cache.has(p.discord_role_id))
+      .map((p) => `<@&${p.discord_role_id}> to ${p.vrchat_role_name}`)
 
     await interaction.editReply({
       embeds: [{
-        title: 'Profile roles rechecked',
+        title: 'Roles rechecked',
         color: EMBED_COLOR,
         fields: [
           { name: 'Member', value: `<@${target.id}>`, inline: true },
           { name: 'VRChat', value: profileLink(link.vrchat_id, link.vrchat_name), inline: true },
-          { name: 'Profile roles now held', value: held.join('\n') || 'None', inline: false },
+          { name: 'In the group', value: result?.inGroup ? 'Yes' : result?.groupKnown ? 'No' : 'Could not tell', inline: true },
+          { name: 'Changes made', value: String(result?.changed ?? 0), inline: true },
+          { name: 'Profile roles held', value: held.join('\n') || 'None', inline: false },
+          { name: 'Linked roles held', value: linked.join('\n') || 'None', inline: false },
           { name: 'Blocking problems', value: problems.join('\n\n') || 'None found', inline: false },
         ],
         timestamp: new Date().toISOString(),
@@ -342,30 +570,34 @@ async function handleRecheckRoles(interaction) {
     return
   }
 
-  const links = db.listLinks()
-  const batch = links.slice(0, RECHECK_CAP)
-  let done = 0
-  let failed = 0
-  for (const link of batch) {
-    try {
-      await sync.syncOneUser(interaction.client, link.discord_id)
-      done += 1
-    } catch (err) {
-      failed += 1
-      log.warn(`/recheck-roles failed for ${link.discord_id}:`, err.message)
-    }
+  await interaction.editReply('Running a full pass over every linked member. This reads the cached group roster, so it does not hammer VRChat.')
+
+  let result
+  try {
+    result = await sync.runCycle(interaction.client)
+  } catch (err) {
+    log.warn('/recheck-roles sweep failed:', err.message)
+    await interaction.editReply(`Sync failed: ${err.vrchatMessage || err.message}`)
+    return
+  }
+
+  if (result?.skipped) {
+    await interaction.editReply('A sync pass is already running right now. Give it a moment and check **/sync-status**.')
+    return
   }
 
   await interaction.editReply({
+    content: '',
     embeds: [{
-      title: 'Profile roles rechecked',
+      title: 'Roles rechecked',
       color: EMBED_COLOR,
       fields: [
-        { name: 'Members synced', value: `${done} of ${links.length}${links.length > RECHECK_CAP ? ` (capped at ${RECHECK_CAP} per run)` : ''}`, inline: true },
-        { name: 'Failed', value: String(failed), inline: true },
+        { name: 'Members checked', value: `${result?.checked ?? 0} of ${db.countLinks()}`, inline: true },
+        { name: 'Role changes made', value: String(result?.changed ?? 0), inline: true },
+        { name: 'Profiles refreshed', value: String(result?.profiles ?? 0), inline: true },
         { name: 'Blocking problems', value: problems.join('\n\n') || 'None found', inline: false },
       ],
-      footer: { text: 'The bot also rechecks everyone automatically on its sync loop' },
+      footer: { text: 'The bot runs this pass on its own schedule too; see /sync-status' },
       timestamp: new Date().toISOString(),
     }],
   })
@@ -495,6 +727,10 @@ module.exports = {
   handleVrcBans,
   handleBansPageButton,
   handleVrcSearch,
+  handleVrcRoleMembers,
+  handleVrcInvite,
+  handleVrcPost,
+  handleGroupInfo,
   handleAuditMembers,
   handleRecheckRoles,
   handleJoinRequestButton,

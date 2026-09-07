@@ -1,24 +1,16 @@
 'use strict'
 
-// The sync engine: two way linked role sync, profile based misc roles, and
-// stat tracker channels. Built to stay far under the VRChat API rate limit:
-// every VRChat call is throttled globally (vrchatAuth), users are processed
-// in small batches per cycle, and Discord channel renames respect Discord's
-// own 2-per-10-minutes limit.
+// Two way linked role sync, profile based misc roles, and stat tracker channels, driven off a cached roster so a full pass is free.
 
 const { PermissionFlagsBits } = require('discord.js')
 const config = require('./config')
 const db = require('./db')
 const logger = require('./logger')
 const vrc = require('./vrchatApi')
+const roster = require('./roster')
 const discordLog = require('./discordLog')
 
 const log = logger('Sync')
-
-// How many linked users get a full VRChat profile check per cycle. Two API
-// calls per user (profile + group membership), so 10 users = 20 calls,
-// comfortably inside the per-minute cap alongside trackers.
-const USERS_PER_CYCLE = 10
 
 // Discord allows roughly 2 channel renames per 10 minutes; stay safe.
 const RENAME_MIN_INTERVAL_MS = 6 * 60 * 1000
@@ -33,41 +25,117 @@ const RANK_KEY_BY_TRUST = {
   visitor: 'rank_visitor',
 }
 
+// Tenure roles, longest first: a member only keeps the highest one earned.
+const TENURE_TIERS = [
+  { key: 'tenure_1y', days: 365 },
+  { key: 'tenure_6m', days: 182 },
+  { key: 'tenure_1m', days: 30 },
+]
+const TENURE_KEYS = TENURE_TIERS.map((t) => t.key)
+
 let running = false
-let userCursor = 0
+let clientRef = null
+const stats = {
+  cycles: 0,
+  lastCycleAt: 0,
+  lastCycleMs: 0,
+  lastChecked: 0,
+  lastChanged: 0,
+  lastProfiles: 0,
+  eventsHandled: 0,
+  lastError: '',
+}
+
+// ---------------------------------------------------------------
+// per member serialisation
+// ---------------------------------------------------------------
+
+// The cycle, the gateway fast path, and the admin commands can all hit one member at once, and interleaving would clobber role state.
+const chains = new Map()
+
+function withMemberLock(discordId, task) {
+  const key = String(discordId)
+  const previous = chains.get(key) || Promise.resolve()
+  const result = previous.then(task, task)
+  const settled = result.catch(() => {})
+  chains.set(key, settled)
+  settled.then(() => {
+    if (chains.get(key) === settled) chains.delete(key)
+  })
+  return result
+}
+
+// ---------------------------------------------------------------
+// echo suppression
+// ---------------------------------------------------------------
+
+// Every role edit the bot makes comes back as a GuildMemberUpdate; without this the fast path re-examines its own work and can flap.
+const SELF_EDIT_TTL_MS = 30_000
+const selfEdits = new Map()
+
+function markSelfEdit(discordId, roleIds) {
+  const until = Date.now() + SELF_EDIT_TTL_MS
+  for (const roleId of roleIds) selfEdits.set(`${discordId}:${roleId}`, until)
+}
+
+function wasSelfEdit(discordId, roleId) {
+  const key = `${discordId}:${roleId}`
+  const until = selfEdits.get(key)
+  if (!until) return false
+  selfEdits.delete(key)
+  return until > Date.now()
+}
+
+function pruneSelfEdits() {
+  const now = Date.now()
+  for (const [key, until] of selfEdits) {
+    if (until < now) selfEdits.delete(key)
+  }
+}
 
 // ---------------------------------------------------------------
 // VRChat hierarchy refusals
 // ---------------------------------------------------------------
 
-// VRChat only lets an account edit members BELOW its own highest group
-// role, no matter what Discord permissions the bot has. When that (or a
-// missing group permission) blocks an edit, pause VRChat role edits for
-// that member instead of retrying every cycle, and alert once.
+// VRChat only lets an account edit members below its own highest group role, so pause edits for a refused member and alert once.
 const HIERARCHY_BLOCK_MS = 6 * 60 * 60 * 1000
-const hierarchyBlockedUntil = new Map()
-const hierarchyAlerted = new Set()
+const KV_HIERARCHY = 'hierarchy_blocks'
+
+function loadHierarchyBlocks() {
+  const raw = db.getKv(KV_HIERARCHY, {})
+  return raw && typeof raw === 'object' ? raw : {}
+}
 
 function isHierarchyError(err) {
   return err?.status === 403 || /same or higher rank|not allowed/i.test(String(err?.message || ''))
 }
 
 function isHierarchyBlocked(vrchatId) {
-  const until = hierarchyBlockedUntil.get(vrchatId)
+  const blocks = loadHierarchyBlocks()
+  const until = blocks[vrchatId]
   if (!until) return false
   if (Date.now() > until) {
-    hierarchyBlockedUntil.delete(vrchatId)
+    delete blocks[vrchatId]
+    db.setKv(KV_HIERARCHY, blocks)
     return false
   }
   return true
 }
 
+function hierarchyBlockCount() {
+  const now = Date.now()
+  return Object.values(loadHierarchyBlocks()).filter((until) => until > now).length
+}
+
 function noteHierarchyBlock(link, roleName, err) {
-  hierarchyBlockedUntil.set(link.vrchat_id, Date.now() + HIERARCHY_BLOCK_MS)
+  const blocks = loadHierarchyBlocks()
+  const alreadyBlocked = Number(blocks[link.vrchat_id] || 0) > Date.now()
+  blocks[link.vrchat_id] = Date.now() + HIERARCHY_BLOCK_MS
+  db.setKv(KV_HIERARCHY, blocks)
+
   const who = link.vrchat_name || link.vrchat_id
   log.warn(`VRChat refuses role edits for ${who} (group hierarchy or permissions): ${err.vrchatMessage || err.message}`)
-  if (hierarchyAlerted.has(link.vrchat_id)) return
-  hierarchyAlerted.add(link.vrchat_id)
+  if (alreadyBlocked) return
   discordLog.logAlert(
     'VRChat blocks role sync for a member',
     [
@@ -124,6 +192,7 @@ async function readStat(stat) {
     const instances = await vrc.getGroupInstances()
     return instances.reduce((sum, inst) => sum + Number(inst?.memberCount ?? inst?.nUsers ?? 0), 0)
   }
+  if (stat === 'linked_members') return db.countLinks()
   throw new Error(`Unknown stat: ${stat}`)
 }
 
@@ -131,9 +200,12 @@ async function updateTrackers(guild) {
   const trackers = db.listTrackers()
   if (!trackers.length) return
 
-  // One API read per stat type per cycle, shared across channels.
+  // A tracker inside its rename cooldown cannot use a fresh number, and every read is an API call.
+  const due = trackers.filter((t) => Date.now() - t.last_renamed_at >= RENAME_MIN_INTERVAL_MS)
+  if (!due.length) return
+
   const values = {}
-  for (const stat of new Set(trackers.map((t) => t.stat))) {
+  for (const stat of new Set(due.map((t) => t.stat))) {
     try {
       values[stat] = String(await readStat(stat))
     } catch (err) {
@@ -141,7 +213,7 @@ async function updateTrackers(guild) {
     }
   }
 
-  for (const tracker of trackers) {
+  for (const tracker of due) {
     const value = values[tracker.stat]
     if (value == null) continue
 
@@ -154,7 +226,6 @@ async function updateTrackers(guild) {
     }
 
     if (value === tracker.last_value) continue
-    if (Date.now() - tracker.last_renamed_at < RENAME_MIN_INTERVAL_MS) continue
 
     const newName = `${tracker.label}: ${value}`
     try {
@@ -168,16 +239,8 @@ async function updateTrackers(guild) {
 }
 
 // ---------------------------------------------------------------
-// misc roles (18+, VRC+, trust ranks, repping, group tenure)
+// profile facts (18+, VRC+, trust rank) and misc roles
 // ---------------------------------------------------------------
-
-// Tenure roles, longest first: a member only keeps the highest one earned.
-const TENURE_TIERS = [
-  { key: 'tenure_1y', days: 365 },
-  { key: 'tenure_6m', days: 182 },
-  { key: 'tenure_1m', days: 30 },
-]
-const TENURE_KEYS = TENURE_TIERS.map((t) => t.key)
 
 function tenureKeyFor(joinedAt) {
   const ms = Date.parse(joinedAt || '')
@@ -186,80 +249,124 @@ function tenureKeyFor(joinedAt) {
   return TENURE_TIERS.find((t) => days >= t.days)?.key || null
 }
 
-async function applyMiscRoles(member, vrchatUser, groupMember = null) {
-  const miscRoles = db.getMiscRoles()
-  if (!Object.keys(miscRoles).length) return
-
-  const rank = vrc.getTrustRank(vrchatUser)
-  const wantedRankKey = RANK_KEY_BY_TRUST[rank.key] || 'rank_visitor'
-
-  const wants = {
-    age_18: vrc.isAgeVerified18Plus(vrchatUser),
-    vrc_plus: vrc.hasVrcPlus(vrchatUser),
+/** Pull a profile from VRChat and cache the few facts the roles need. */
+async function refreshProfileFacts(link) {
+  const user = await vrc.getUser(link.vrchat_id)
+  if (!user) return null
+  const facts = {
+    vrchatId: link.vrchat_id,
+    displayName: user.displayName || link.vrchat_name || '',
+    trustKey: vrc.getTrustRank(user).key,
+    vrcPlus: vrc.hasVrcPlus(user),
+    age18: vrc.isAgeVerified18Plus(user),
+    fetchedAt: Date.now(),
   }
-  for (const key of RANK_KEYS) wants[key] = key === wantedRankKey
+  db.setProfileFacts(link.vrchat_id, facts)
+  if (facts.displayName && facts.displayName !== link.vrchat_name) {
+    db.createLink(link.discord_id, link.vrchat_id, facts.displayName)
+  }
+  return facts
+}
 
-  // Group member extras. Only touched when we actually have the member
-  // object, so a failed fetch never strips someone's roles.
+/** Roles a member should hold. Keys with no evidence behind them are left out, so a missing profile never strips anything. */
+function desiredMiscRoles(facts, groupMember, { groupKnown = false } = {}) {
+  const wants = {}
+  if (facts) {
+    wants.age_18 = facts.age18
+    wants.vrc_plus = facts.vrcPlus
+    const rankKey = RANK_KEY_BY_TRUST[facts.trustKey] || 'rank_visitor'
+    for (const key of RANK_KEYS) wants[key] = key === rankKey
+  }
   if (groupMember) {
     wants.repping = Boolean(groupMember.isRepresenting)
     const tenureKey = tenureKeyFor(groupMember.joinedAt)
     for (const key of TENURE_KEYS) wants[key] = key === tenureKey
+  } else if (groupKnown) {
+    wants.repping = false
+    for (const key of TENURE_KEYS) wants[key] = false
   }
-
-  for (const [key, roleId] of Object.entries(miscRoles)) {
-    if (!(key in wants)) continue
-    const has = member.roles.cache.has(roleId)
-    const want = Boolean(wants[key])
-    if (want === has) continue
-    try {
-      if (want) await member.roles.add(roleId, 'VRChat profile sync')
-      else await member.roles.remove(roleId, 'VRChat profile sync')
-      log.info(`${want ? 'Added' : 'Removed'} misc role ${key} ${want ? 'to' : 'from'} ${member.user.tag}`)
-      discordLog.logRoleChange({
-        discordId: member.id,
-        action: want ? 'added' : 'removed',
-        side: 'Discord',
-        roleName: `<@&${roleId}> (${key})`,
-        drivenBy: 'VRChat profile (misc role)',
-      })
-    } catch (err) {
-      log.warn(`misc role ${key} update failed for ${member.user.tag}:`, err.message)
-      noteMiscRolePermissionProblem(key, roleId, err)
-    }
-  }
+  return wants
 }
 
-// Discord refuses role edits when the bot's highest role is not above the
-// role being assigned (or Manage Roles is missing). Alert once per role.
-const miscRoleAlerted = new Set()
-function noteMiscRolePermissionProblem(key, roleId, err) {
+// Discord refuses role edits when the bot's highest role is not above the target role, or Manage Roles is missing.
+const roleAlerted = new Set()
+function noteRolePermissionProblem(label, roleId, err) {
   const msg = String(err?.message || '')
   if (!/missing permissions|missing access|hierarchy/i.test(msg)) return
-  if (miscRoleAlerted.has(key)) return
-  miscRoleAlerted.add(key)
+  if (roleAlerted.has(roleId)) return
+  roleAlerted.add(roleId)
   discordLog.logAlert(
-    'Discord blocks a misc role',
+    'Discord blocks a role',
     [
-      `I cannot assign <@&${roleId}> (**${key}**): ${msg}`,
+      `I cannot assign <@&${roleId}> (**${label}**): ${msg}`,
       '',
-      'Fix in Discord server settings, Roles: drag the bot\'s role **above** the 18+, VRC+, and trust rank roles, and make sure the bot has **Manage Roles**.',
+      'Fix in Discord server settings, Roles: drag the bot\'s role **above** every role it hands out, and make sure the bot has **Manage Roles**.',
     ].join('\n')
   )
 }
 
+/** Apply a batch of role changes in one write, built from the roles the member already holds so only managed roles move. */
+async function applyDiscordRoles(member, changes) {
+  if (!changes.length) return { applied: [], failed: [] }
+
+  markSelfEdit(member.id, changes.map((c) => c.roleId))
+
+  if (changes.length === 1) {
+    const change = changes[0]
+    try {
+      if (change.add) await member.roles.add(change.roleId, change.reason)
+      else await member.roles.remove(change.roleId, change.reason)
+      return { applied: changes, failed: [] }
+    } catch (err) {
+      log.warn(`role update failed for ${member.user.tag}:`, err.message)
+      noteRolePermissionProblem(change.label, change.roleId, err)
+      return { applied: [], failed: changes }
+    }
+  }
+
+  const target = new Set(
+    member.roles.cache.filter((r) => r.id !== member.guild.id).map((r) => r.id)
+  )
+  for (const change of changes) {
+    if (change.add) target.add(change.roleId)
+    else target.delete(change.roleId)
+  }
+
+  try {
+    await member.roles.set([...target], changes[0].reason)
+    return { applied: changes, failed: [] }
+  } catch (err) {
+    log.warn(`batched role update failed for ${member.user.tag}:`, err.message)
+    for (const change of changes) noteRolePermissionProblem(change.label, change.roleId, err)
+    return { applied: [], failed: changes }
+  }
+}
+
 // ---------------------------------------------------------------
 // misc role health
-//
-// The single most common reason profile roles never appear is that
-// /setup-misc-roles was never run, or the bot's own role sits below the
-// roles it is meant to hand out. Check both on startup and every hour and
-// say so loudly instead of failing quietly.
 // ---------------------------------------------------------------
 
+// Roles usually fail to appear because /setup-misc-roles was never run or the bot's role sits below the ones it hands out.
 const MISC_HEALTH_INTERVAL_MS = 60 * 60 * 1000
 let lastMiscHealthAt = 0
 let miscHealthAlerted = ''
+
+// The roster is what makes a whole-group pass affordable, so losing it is a real degradation worth saying out loud once.
+let rosterAlerted = false
+function noteRosterUnusable() {
+  const state = roster.status()
+  log.warn(`Group member list unavailable (${state.lastError || 'never loaded'}); syncing a few members per cycle instead of all of them.`)
+  if (rosterAlerted) return
+  rosterAlerted = true
+  discordLog.logAlert(
+    'I cannot read the group member list',
+    [
+      `Reading the whole member list is what lets me check every linked member every cycle. It is failing: ${state.lastError || 'it has never loaded'}.`,
+      '',
+      'The bot\'s VRChat account needs a group role with permission to **view all members**. Until then I fall back to checking a few members per cycle, so role changes take much longer to land.',
+    ].join('\n')
+  )
+}
 
 async function miscRoleHealth(client) {
   const miscRoles = db.getMiscRoles()
@@ -283,10 +390,14 @@ async function miscRoleHealth(client) {
     }
     const myTop = me.roles.highest?.position ?? 0
     const blocked = []
-    for (const [key, roleId] of Object.entries(miscRoles)) {
+    const managed = [
+      ...Object.entries(miscRoles),
+      ...db.listLinkedRoles().map((p) => [p.discord_role_name || 'linked role', p.discord_role_id]),
+    ]
+    for (const [key, roleId] of managed) {
       const role = guild.roles.cache.get(roleId) || await guild.roles.fetch(roleId).catch(() => null)
       if (!role) {
-        blocked.push(`${key} (role was deleted, re-run /setup-misc-roles)`)
+        blocked.push(`${key} (role was deleted)`)
       } else if (role.position >= myTop) {
         blocked.push(`${role.name} (sits above me)`)
       }
@@ -298,71 +409,55 @@ async function miscRoleHealth(client) {
 
   const signature = problems.join(' | ')
   if (problems.length) {
-    log.warn(`Profile role check: ${signature}`)
+    log.warn(`Role health check: ${signature}`)
     if (signature !== miscHealthAlerted) {
       miscHealthAlerted = signature
-      discordLog.logAlert('Profile roles are not being applied', problems.join('\n\n'))
+      discordLog.logAlert('Roles are not being applied', problems.join('\n\n'))
     }
   } else {
-    if (miscHealthAlerted) log.info('Profile role problems cleared.')
+    if (miscHealthAlerted) log.info('Role problems cleared.')
     miscHealthAlerted = ''
-    log.debug(`Profile roles healthy (${Object.keys(miscRoles).length} roles).`)
+    log.debug(`Roles healthy (${Object.keys(miscRoles).length} profile roles).`)
   }
   return problems
 }
 
-async function removeMiscRoles(client, discordId) {  const guild = await client.guilds.fetch(config.discord.guildId)
+async function removeMiscRoles(client, discordId) {
+  const guild = await client.guilds.fetch(config.discord.guildId)
   const member = await guild.members.fetch(discordId).catch(() => null)
   if (!member) return
-  const miscRoles = db.getMiscRoles()
-  for (const roleId of Object.values(miscRoles)) {
-    if (member.roles.cache.has(roleId)) {
-      await member.roles.remove(roleId, 'VRChat account unlinked').catch(() => {})
-    }
-  }
+  const held = Object.values(db.getMiscRoles()).filter((roleId) => member.roles.cache.has(roleId))
+  if (!held.length) return
+  markSelfEdit(member.id, held)
+  const target = member.roles.cache
+    .filter((r) => r.id !== guild.id && !held.includes(r.id))
+    .map((r) => r.id)
+  await member.roles.set(target, 'VRChat account unlinked').catch(() => {})
 }
 
 // ---------------------------------------------------------------
 // two way linked role sync
-//
-// For every (linked user, linked role pair) we remember the last state of
-// both sides. On each pass we compare current state to the stored state:
-//   - only Discord changed  -> mirror the change to VRChat
-//   - only VRChat changed   -> mirror the change to Discord
-//   - both changed the same way -> nothing to mirror
-//   - both changed against each other -> Discord wins (deterministic)
-// First time we see a user, holding the role on either side grants the
-// other side (union), which matches "when they get the role, give it".
 // ---------------------------------------------------------------
 
-async function syncLinkedRolesForMember(member, groupMember) {
-  const pairs = db.listLinkedRoles()
-  if (!pairs.length) return
-
-  const inGroup = Boolean(groupMember)
+// Whichever side moved away from the stored state gets mirrored to the other; a genuine conflict goes to sync.conflict_winner.
+function planLinkedRoles(member, groupMember, { firstSight = false } = {}) {
+  const plan = []
   const vrchatRoleIds = new Set(groupMember?.roleIds || [])
-  const link = db.getLinkByDiscord(member.id)
-  if (!link) return
+  const inGroup = Boolean(groupMember)
 
-  // Group membership transitions: when a member who linked while outside
-  // the group finally joins (or rejoins), rerun the first-sight union so
-  // the roles they hold on either side get granted on the other. Union
-  // only ever grants, it never removes.
-  const wasInGroup = db.getKv(`in_group:${member.id}`, null)
-  const joinUnion = inGroup && wasInGroup !== true
-
-  for (const pair of pairs) {
+  for (const pair of db.listLinkedRoles()) {
     const hasDiscord = member.roles.cache.has(pair.discord_role_id)
     const hasVrchat = vrchatRoleIds.has(pair.vrchat_role_id)
-    const stored = joinUnion ? null : db.getRoleState(member.id, pair.discord_role_id)
+    const stored = firstSight ? null : db.getRoleState(member.id, pair.discord_role_id)
 
     let targetDiscord = hasDiscord
     let targetVrchat = hasVrchat
 
     if (!stored) {
-      // First sight: union grants.
-      targetDiscord = hasDiscord || hasVrchat
-      targetVrchat = hasDiscord || hasVrchat
+      if (config.sync.grantOnFirstSight) {
+        targetDiscord = hasDiscord || hasVrchat
+        targetVrchat = hasDiscord || hasVrchat
+      }
     } else {
       const discordChanged = hasDiscord !== Boolean(stored.had_discord)
       const vrchatChanged = hasVrchat !== Boolean(stored.had_vrchat)
@@ -371,101 +466,208 @@ async function syncLinkedRolesForMember(member, groupMember) {
       } else if (vrchatChanged && !discordChanged) {
         targetDiscord = hasVrchat
       } else if (discordChanged && vrchatChanged && hasDiscord !== hasVrchat) {
-        // Conflict in opposite directions inside one cycle: Discord wins.
-        targetVrchat = hasDiscord
-        targetDiscord = hasDiscord
+        const winner = config.sync.conflictWinner === 'vrchat' ? hasVrchat : hasDiscord
+        targetDiscord = winner
+        targetVrchat = winner
       }
     }
 
-    // Apply Discord side
-    if (targetDiscord !== hasDiscord) {
-      try {
-        if (targetDiscord) await member.roles.add(pair.discord_role_id, 'VRChat group role sync')
-        else await member.roles.remove(pair.discord_role_id, 'VRChat group role sync')
-        log.info(`${targetDiscord ? 'Added' : 'Removed'} @${pair.discord_role_name} ${targetDiscord ? 'to' : 'from'} ${member.user.tag} (VRChat side drove it)`)
-        discordLog.logRoleChange({
-          discordId: member.id,
-          action: targetDiscord ? 'added' : 'removed',
-          side: 'Discord',
-          roleName: `@${pair.discord_role_name}`,
-          drivenBy: 'VRChat group change',
-        })
-      } catch (err) {
-        log.warn(`discord role update failed for ${member.user.tag}:`, err.message)
-        targetDiscord = hasDiscord
-      }
-    }
+    // Nobody holds a group role while outside the group.
+    if (!inGroup) targetVrchat = false
 
-    // Apply VRChat side (only possible when they are in the group)
-    if (targetVrchat !== hasVrchat) {
-      if (!inGroup || isHierarchyBlocked(link.vrchat_id)) {
-        targetVrchat = hasVrchat
-      } else {
-        try {
-          if (targetVrchat) await vrc.addGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
-          else await vrc.removeGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
-          log.info(`${targetVrchat ? 'Added' : 'Removed'} VRChat role ${pair.vrchat_role_name} ${targetVrchat ? 'to' : 'from'} ${link.vrchat_name || link.vrchat_id} (Discord side drove it)`)
-          discordLog.logRoleChange({
-            discordId: member.id,
-            action: targetVrchat ? 'added' : 'removed',
-            side: 'VRChat',
-            roleName: pair.vrchat_role_name,
-            drivenBy: 'Discord role change',
-          })
-        } catch (err) {
-          if (isHierarchyError(err)) noteHierarchyBlock(link, pair.vrchat_role_name, err)
-          else log.warn(`vrchat role update failed for ${link.vrchat_id}:`, err.message)
-          targetVrchat = hasVrchat
-        }
-      }
-    }
-
-    db.setRoleState(member.id, pair.discord_role_id, targetDiscord, targetVrchat)
+    plan.push({ pair, hasDiscord, hasVrchat, targetDiscord, targetVrchat, inGroup })
   }
 
-  db.setKv(`in_group:${member.id}`, inGroup)
+  return plan
 }
 
 // ---------------------------------------------------------------
-// per-user full sync (profile + membership + roles)
+// one member, one pass
 // ---------------------------------------------------------------
 
-async function syncOneUser(client, discordId) {
+/** Reconcile one member from data already in hand: one Discord write, plus one VRChat call per linked pair that moved. */
+async function reconcile(member, link, { facts, groupMember, groupKnown }) {
+  const miscRoles = db.getMiscRoles()
+  const changes = []
+
+  const wants = desiredMiscRoles(facts, groupMember, { groupKnown })
+  for (const [key, roleId] of Object.entries(miscRoles)) {
+    if (!(key in wants)) continue
+    const has = member.roles.cache.has(roleId)
+    const want = Boolean(wants[key])
+    if (want === has) continue
+    changes.push({ roleId, add: want, label: key, kind: 'misc', reason: 'VRChat profile sync' })
+  }
+
+  // Unknown membership reads as every VRChat role missing, and joining is not a change against stored state, so a join re-runs the union.
+  const wasInGroup = db.getKv(`in_group:${member.id}`, null)
+  const joinUnion = Boolean(groupMember) && wasInGroup !== true
+  const linkedPlan = groupKnown ? planLinkedRoles(member, groupMember, { firstSight: joinUnion }) : []
+  for (const step of linkedPlan) {
+    if (step.targetDiscord === step.hasDiscord) continue
+    changes.push({
+      roleId: step.pair.discord_role_id,
+      add: step.targetDiscord,
+      label: step.pair.discord_role_name,
+      kind: 'linked',
+      reason: 'VRChat group role sync',
+    })
+  }
+
+  const { applied, failed } = await applyDiscordRoles(member, changes)
+  const failedIds = new Set(failed.map((c) => c.roleId))
+
+  for (const change of applied) {
+    log.info(`${change.add ? 'Added' : 'Removed'} ${change.label} ${change.add ? 'to' : 'from'} ${member.user.tag}`)
+    discordLog.logRoleChange({
+      discordId: member.id,
+      action: change.add ? 'added' : 'removed',
+      side: 'Discord',
+      roleName: change.kind === 'misc' ? `<@&${change.roleId}> (${change.label})` : `@${change.label}`,
+      drivenBy: change.kind === 'misc' ? 'VRChat profile (misc role)' : 'VRChat group change',
+    })
+  }
+
+  for (const step of linkedPlan) {
+    const { pair } = step
+    const finalDiscord = failedIds.has(pair.discord_role_id) ? step.hasDiscord : step.targetDiscord
+    let finalVrchat = step.hasVrchat
+
+    if (step.targetVrchat !== step.hasVrchat && step.inGroup && !isHierarchyBlocked(link.vrchat_id)) {
+      try {
+        if (step.targetVrchat) await vrc.addGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
+        else await vrc.removeGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
+        finalVrchat = step.targetVrchat
+        log.info(`${finalVrchat ? 'Added' : 'Removed'} VRChat role ${pair.vrchat_role_name} ${finalVrchat ? 'to' : 'from'} ${link.vrchat_name || link.vrchat_id}`)
+        discordLog.logRoleChange({
+          discordId: member.id,
+          action: finalVrchat ? 'added' : 'removed',
+          side: 'VRChat',
+          roleName: pair.vrchat_role_name,
+          drivenBy: 'Discord role change',
+        })
+        // Keep the roster honest so the next pass does not undo this.
+        if (groupMember) {
+          const ids = new Set(groupMember.roleIds || [])
+          if (finalVrchat) ids.add(pair.vrchat_role_id)
+          else ids.delete(pair.vrchat_role_id)
+          groupMember.roleIds = [...ids]
+          roster.put(link.vrchat_id, groupMember)
+        }
+      } catch (err) {
+        if (isHierarchyError(err)) noteHierarchyBlock(link, pair.vrchat_role_name, err)
+        else log.warn(`vrchat role update failed for ${link.vrchat_id}:`, err.message)
+      }
+    }
+
+    db.setRoleState(member.id, pair.discord_role_id, finalDiscord, finalVrchat)
+  }
+
+  if (groupKnown) db.setKv(`in_group:${member.id}`, Boolean(groupMember))
+  return applied.length
+}
+
+/** Resolve group membership without guessing: the roster answers free, and only an apparent leaver costs a call. */
+async function resolveGroupMember(link, { verify = false } = {}) {
+  if (verify) {
+    try {
+      const fresh = await vrc.getGroupMember(link.vrchat_id)
+      roster.put(link.vrchat_id, fresh)
+      return { groupMember: fresh, groupKnown: true }
+    } catch (err) {
+      log.warn(`group member fetch failed for ${link.vrchat_id}:`, err.message)
+      return { groupMember: null, groupKnown: false }
+    }
+  }
+
+  const cached = roster.get(link.vrchat_id)
+  if (cached) return { groupMember: cached, groupKnown: true }
+  if (!roster.isFresh()) return { groupMember: null, groupKnown: false }
+
+  // Paging a live member list can miss a row when somebody leaves mid-walk, and absence is the one answer that strips roles.
+  if (db.getKv(`in_group:${link.discord_id}`, null) === false) {
+    return { groupMember: null, groupKnown: true }
+  }
+  return resolveGroupMember(link, { verify: true })
+}
+
+async function syncMemberNow(client, discordId, { verify = false, refreshProfile = false } = {}) {
   const link = db.getLinkByDiscord(discordId)
-  if (!link) return
+  if (!link) return { ok: false, reason: 'not linked' }
 
   const guild = await client.guilds.fetch(config.discord.guildId)
   const member = await guild.members.fetch(discordId).catch(() => null)
-  if (!member) return
+  if (!member) return { ok: false, reason: 'not in the Discord server' }
 
-  let vrchatUser = null
+  let facts = db.getProfileFacts(link.vrchat_id)
+  const ttlMs = config.sync.profileTtlHours * 3_600_000
+  if (refreshProfile || !facts || Date.now() - facts.fetchedAt > ttlMs) {
+    try {
+      facts = (await refreshProfileFacts(link)) || facts
+    } catch (err) {
+      log.warn(`profile fetch failed for ${link.vrchat_id}:`, err.message)
+    }
+  }
+
+  const { groupMember, groupKnown } = await resolveGroupMember(link, { verify })
+  const changed = await reconcile(member, link, { facts, groupMember, groupKnown })
+  return { ok: true, changed, inGroup: Boolean(groupMember), groupKnown, facts, link }
+}
+
+/** Public entry point, serialised per member. */
+function syncOneUser(client, discordId, options = {}) {
+  return withMemberLock(discordId, () => syncMemberNow(client, discordId, options))
+}
+
+// ---------------------------------------------------------------
+// event driven queue
+// ---------------------------------------------------------------
+
+// The audit log feed already reads every group event, so routing them here means a VRChat side change lands within a poll.
+const QUEUE_CAP = 500
+const QUEUE_COOLDOWN_MS = 20_000
+const QUEUE_PER_DRAIN = 5
+
+const queue = new Map()
+const queuedRecently = new Map()
+let drainTimer = null
+let draining = false
+
+function requestSync(discordId, reason = 'event') {
+  if (config.simpleMode) return false
+  const id = String(discordId)
+  if (queue.has(id)) return false
+  if (Date.now() - (queuedRecently.get(id) || 0) < QUEUE_COOLDOWN_MS) return false
+  if (queue.size >= QUEUE_CAP) return false
+  queuedRecently.set(id, Date.now())
+  queue.set(id, { reason, at: Date.now() })
+  return true
+}
+
+function requestSyncByVrchat(vrchatId, reason = 'event') {
+  const link = db.getLinkByVrchat(vrchatId)
+  if (!link) return false
+  return requestSync(link.discord_id, reason)
+}
+
+async function drainQueue() {
+  if (draining || !clientRef || !queue.size) return
+  draining = true
   try {
-    vrchatUser = await vrc.getUser(link.vrchat_id)
-  } catch (err) {
-    log.warn(`profile fetch failed for ${link.vrchat_id}:`, err.message)
+    for (const [discordId, entry] of [...queue.entries()].slice(0, QUEUE_PER_DRAIN)) {
+      queue.delete(discordId)
+      try {
+        // The event says this member just changed, so the roster copy is known to be behind.
+        await syncOneUser(clientRef, discordId, { verify: true })
+        stats.eventsHandled += 1
+        log.debug(`Event sync done for ${discordId} (${entry.reason})`)
+      } catch (err) {
+        log.warn(`event sync failed for ${discordId}:`, err.message)
+      }
+    }
+  } finally {
+    draining = false
   }
-  if (!vrchatUser) return
-
-  // Keep the stored display name fresh.
-  if (vrchatUser.displayName && vrchatUser.displayName !== link.vrchat_name) {
-    db.createLink(discordId, link.vrchat_id, vrchatUser.displayName)
-  }
-
-  let groupMember = null
-  let groupFetchFailed = false
-  try {
-    groupMember = await vrc.getGroupMember(link.vrchat_id)
-  } catch (err) {
-    groupFetchFailed = true
-    log.warn(`group member fetch failed for ${link.vrchat_id}:`, err.message)
-  }
-
-  await applyMiscRoles(member, vrchatUser, groupMember)
-  // A failed fetch means membership is UNKNOWN, not "left the group":
-  // running the linked role sync on it would read every VRChat role as
-  // missing and strip the Discord side over a network blip. Skip it; a
-  // real 404 comes back as null without throwing and syncs normally.
-  if (!groupFetchFailed) await syncLinkedRolesForMember(member, groupMember)
 }
 
 // ---------------------------------------------------------------
@@ -476,7 +678,6 @@ async function onMemberUpdate(oldMember, newMember) {
   if (config.simpleMode) return
   const link = db.getLinkByDiscord(newMember.id)
   if (!link) return
-  if (isHierarchyBlocked(link.vrchat_id)) return
   const pairs = db.listLinkedRoles()
   if (!pairs.length) return
 
@@ -485,117 +686,196 @@ async function onMemberUpdate(oldMember, newMember) {
   )
   if (!changed.length) return
 
-  let groupMember = null
-  try {
-    groupMember = await vrc.getGroupMember(link.vrchat_id)
-  } catch (err) {
-    log.warn('fast path group fetch failed:', err.message)
-    return
-  }
-  if (!groupMember) return
-  const vrchatRoleIds = new Set(groupMember.roleIds || [])
+  // Ignore the echo of the bot's own writes.
+  const human = changed.filter((p) => !wasSelfEdit(newMember.id, p.discord_role_id))
+  if (!human.length) return
+  if (isHierarchyBlocked(link.vrchat_id)) return
 
-  for (const pair of changed) {
-    const nowHas = newMember.roles.cache.has(pair.discord_role_id)
-    const vrchatHas = vrchatRoleIds.has(pair.vrchat_role_id)
-    if (nowHas !== vrchatHas) {
+  await withMemberLock(newMember.id, async () => {
+    let groupMember = roster.get(link.vrchat_id)
+    if (!groupMember) {
       try {
-        if (nowHas) await vrc.addGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
-        else await vrc.removeGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
-        log.info(`Fast sync: ${nowHas ? 'added' : 'removed'} VRChat role ${pair.vrchat_role_name} for ${link.vrchat_name || link.vrchat_id}`)
-        discordLog.logRoleChange({
-          discordId: newMember.id,
-          action: nowHas ? 'added' : 'removed',
-          side: 'VRChat',
-          roleName: pair.vrchat_role_name,
-          drivenBy: 'Discord role change (instant)',
-        })
+        groupMember = await vrc.getGroupMember(link.vrchat_id)
+        roster.put(link.vrchat_id, groupMember)
       } catch (err) {
-        if (isHierarchyError(err)) noteHierarchyBlock(link, pair.vrchat_role_name, err)
-        else log.warn('fast sync failed:', err.message)
-        continue
+        log.warn('fast path group fetch failed:', err.message)
+        return
       }
     }
-    db.setRoleState(newMember.id, pair.discord_role_id, nowHas, nowHas)
-  }
+
+    if (!groupMember) {
+      // Outside the group: record the Discord side so a later pass does not read it as a fresh change.
+      for (const pair of human) {
+        db.setRoleState(newMember.id, pair.discord_role_id, newMember.roles.cache.has(pair.discord_role_id), false)
+      }
+      return
+    }
+
+    const vrchatRoleIds = new Set(groupMember.roleIds || [])
+    for (const pair of human) {
+      const nowHas = newMember.roles.cache.has(pair.discord_role_id)
+      let vrchatHas = vrchatRoleIds.has(pair.vrchat_role_id)
+      if (nowHas !== vrchatHas) {
+        try {
+          if (nowHas) await vrc.addGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
+          else await vrc.removeGroupMemberRole(link.vrchat_id, pair.vrchat_role_id)
+          vrchatHas = nowHas
+          if (nowHas) vrchatRoleIds.add(pair.vrchat_role_id)
+          else vrchatRoleIds.delete(pair.vrchat_role_id)
+          groupMember.roleIds = [...vrchatRoleIds]
+          roster.put(link.vrchat_id, groupMember)
+          log.info(`Fast sync: ${nowHas ? 'added' : 'removed'} VRChat role ${pair.vrchat_role_name} for ${link.vrchat_name || link.vrchat_id}`)
+          discordLog.logRoleChange({
+            discordId: newMember.id,
+            action: nowHas ? 'added' : 'removed',
+            side: 'VRChat',
+            roleName: pair.vrchat_role_name,
+            drivenBy: 'Discord role change (instant)',
+          })
+        } catch (err) {
+          if (isHierarchyError(err)) noteHierarchyBlock(link, pair.vrchat_role_name, err)
+          else log.warn('fast sync failed:', err.message)
+        }
+      }
+      db.setRoleState(newMember.id, pair.discord_role_id, nowHas, vrchatHas)
+    }
+  })
+}
+
+/** A linked member rejoining Discord gets their roles back straight away. */
+function onMemberAdd(member) {
+  if (config.simpleMode) return
+  if (!db.getLinkByDiscord(member.id)) return
+  requestSync(member.id, 'rejoined Discord')
 }
 
 // ---------------------------------------------------------------
 // the loop
 // ---------------------------------------------------------------
 
-async function runCycle(client) {
+/** One full pass: trackers, a roster reload when due, a rotating profile refresh, then every linked member. */
+async function runCycle(client, { onProgress } = {}) {
   if (running) {
     log.debug('Previous cycle still running; skipping this tick')
-    return
+    return { skipped: true }
   }
   running = true
   const startedAt = Date.now()
+  let checked = 0
+  let changed = 0
+  let profiles = 0
+
   try {
     db.purgeExpiredCodes()
+    pruneSelfEdits()
 
     const guild = await client.guilds.fetch(config.discord.guildId)
-
     await updateTrackers(guild)
 
-    // Simple mode keeps the tracker channels but does no linking or role
-    // work at all.
+    // Simple mode keeps the tracker channels but does no linking or role work.
     if (config.simpleMode) {
       log.debug(`Cycle done in ${Date.now() - startedAt}ms (simple mode: trackers only)`)
-      return
+      return { skipped: false, checked: 0, changed: 0 }
     }
 
     if (Date.now() - lastMiscHealthAt > MISC_HEALTH_INTERVAL_MS) {
       lastMiscHealthAt = Date.now()
-      await miscRoleHealth(client).catch((err) => log.warn('profile role check failed:', err.message))
+      await miscRoleHealth(client).catch((err) => log.warn('role health check failed:', err.message))
     }
 
-    // Round robin through linked users so big communities still cover
-    // everyone without ever bursting the API.
-    const links = db.listLinks()
-    if (links.length) {
-      const batch = []
-      for (let i = 0; i < Math.min(USERS_PER_CYCLE, links.length); i++) {
-        batch.push(links[(userCursor + i) % links.length])
-      }
-      userCursor = (userCursor + batch.length) % links.length
+    if (roster.isDue()) await roster.refresh()
 
-      for (const link of batch) {
-        try {
-          await syncOneUser(client, link.discord_id)
-        } catch (err) {
-          log.warn(`user sync failed (${link.discord_id}):`, err.message)
-        }
+    // Rotating profile refresh, oldest first, so a new link is picked up on the next cycle.
+    const ttlMs = config.sync.profileTtlHours * 3_600_000
+    for (const row of db.listLinksByProfileAge(config.sync.profilesPerCycle)) {
+      if (Date.now() - Number(row.fetched_at) < ttlMs) break
+      try {
+        await refreshProfileFacts(row)
+        profiles += 1
+      } catch (err) {
+        log.warn(`profile refresh failed for ${row.vrchat_id}:`, err.message)
       }
     }
 
-    log.debug(`Cycle done in ${Date.now() - startedAt}ms (${links.length} links total)`)
+    // Without a usable roster, ask about a few members directly so linked roles keep moving instead of stalling.
+    const usable = roster.isFresh()
+    if (!usable) noteRosterUnusable()
+    else if (rosterAlerted) {
+      rosterAlerted = false
+      log.info('Group member list is readable again; back to checking every linked member per cycle.')
+    }
+    const links = usable
+      ? db.listLinks()
+      : db.listLinksByProfileAge(config.sync.profilesPerCycle)
+
+    for (const link of links) {
+      try {
+        const result = await syncOneUser(client, link.discord_id, { verify: !usable })
+        checked += 1
+        changed += result?.changed || 0
+        if (onProgress) onProgress(checked, changed)
+      } catch (err) {
+        log.warn(`user sync failed (${link.discord_id}):`, err.message)
+      }
+    }
+
+    stats.lastError = ''
+    log.debug(`Cycle done in ${Date.now() - startedAt}ms (${checked} members, ${changed} role changes, ${profiles} profiles)`)
+    return { skipped: false, checked, changed, profiles }
   } catch (err) {
+    stats.lastError = err.message
     log.error('Sync cycle failed:', err.message)
     discordLog.logAlert('Sync cycle failed', err.message)
+    return { skipped: false, checked, changed, error: err.message }
   } finally {
     running = false
+    stats.cycles += 1
+    stats.lastCycleAt = Date.now()
+    stats.lastCycleMs = Date.now() - startedAt
+    stats.lastChecked = checked
+    stats.lastChanged = changed
+    stats.lastProfiles = profiles
+  }
+}
+
+function status() {
+  return {
+    ...stats,
+    running,
+    links: db.countLinks(),
+    pairs: db.listLinkedRoles().length,
+    freshProfiles: db.countFreshProfiles(config.sync.profileTtlHours * 3_600_000),
+    queued: queue.size,
+    hierarchyBlocked: hierarchyBlockCount(),
+    roster: roster.status(),
+    intervalSeconds: config.sync.intervalSeconds,
+    conflictWinner: config.sync.conflictWinner,
   }
 }
 
 function startLoop(client) {
+  clientRef = client
   const intervalMs = config.sync.intervalSeconds * 1000
+
   if (config.simpleMode) {
     log.info('Simple mode is on: logs only, no account linking or role sync.')
+  } else {
+    if (!Object.keys(db.getMiscRoles()).length) {
+      log.info('Misc roles are not set up yet; run /setup-misc-roles to enable 18+, VRC+, trust rank, repping, and tenure roles.')
+    }
+    const linkCount = db.countLinks()
+    log.info(`Role sync covers all ${linkCount} linked member${linkCount === 1 ? '' : 's'} every ${config.sync.intervalSeconds}s; group events land within ${config.sync.eventDrainSeconds}s.`)
+
+    drainTimer = setInterval(() => {
+      drainQueue().catch((err) => log.warn('queue drain failed:', err.message))
+    }, config.sync.eventDrainSeconds * 1000)
+    drainTimer.unref?.()
   }
-  const linkCount = db.listLinks().length
-  if (config.simpleMode) {
-    // nothing to report about roles
-  } else if (!Object.keys(db.getMiscRoles()).length) {
-    log.info('Misc roles are not set up yet; run /setup-misc-roles to enable 18+, VRC+, trust rank, repping, and tenure roles.')
-  } else if (linkCount) {
-    const minutes = Math.ceil((linkCount / USERS_PER_CYCLE) * config.sync.intervalSeconds / 60)
-    log.info(`Profile roles rechecked for all ${linkCount} linked member${linkCount === 1 ? '' : 's'} about every ${minutes} minute${minutes === 1 ? '' : 's'}.`)
-  }
+
   setTimeout(() => runCycle(client), 10_000)
   const timer = setInterval(() => runCycle(client), intervalMs)
   timer.unref?.()
-  log.info(`Auto sync every ${config.sync.intervalSeconds}s (${USERS_PER_CYCLE} users per cycle, trackers rename at most every ${RENAME_MIN_INTERVAL_MS / 60000} min)`)
+  log.info(`Auto sync every ${config.sync.intervalSeconds}s (roster every ${config.sync.rosterRefreshSeconds}s, ${config.sync.profilesPerCycle} profiles per cycle, trackers rename at most every ${RENAME_MIN_INTERVAL_MS / 60000} min)`)
 }
 
 module.exports = {
@@ -603,10 +883,15 @@ module.exports = {
   runCycle,
   syncOneUser,
   onMemberUpdate,
-  applyMiscRoles,
+  onMemberAdd,
+  requestSync,
+  requestSyncByVrchat,
   removeMiscRoles,
   miscRoleHealth,
   getCachedGroupRoles,
+  refreshProfileFacts,
+  desiredMiscRoles,
   readStat,
   vrchatHealthy,
+  status,
 }

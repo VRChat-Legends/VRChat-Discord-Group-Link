@@ -17,6 +17,7 @@ const crypto = require('crypto')
 const logger = require('./logger')
 const db = require('./db')
 const vrc = require('./vrchatApi')
+const sync = require('./sync')
 const discordLog = require('./discordLog')
 const vrcActions = require('./vrcActions')
 
@@ -49,6 +50,9 @@ const CATEGORIES = {
 // Warn, kick, and ban logs get the moderation controls (reason menu and
 // the Request Ban button), matching the Legends moderation bot.
 const ACTIONABLE_CATEGORIES = new Set(['warn', 'kick', 'ban'])
+
+// Categories that change somebody's group standing: whoever they name gets an immediate role check.
+const SYNC_CATEGORIES = new Set(['role', 'join', 'leave', 'ban', 'unban', 'kick'])
 
 // Known audit event types. Anything not listed is classified by the prefix
 // heuristics below and routed to the default channel when unmatched.
@@ -356,6 +360,18 @@ function anyChannelConfigured() {
   return Object.values(config.groupLogs.channels).some((id) => id)
 }
 
+function queueRoleSync(entry, category) {
+  if (config.simpleMode) return
+  if (!SYNC_CATEGORIES.has(category) && !/member\.update$/.test(String(entry.eventType || ''))) return
+  // The target is whose standing moved; on joins and leaves the actor is that member and there is no separate target.
+  const target = getTarget(entry)
+  const userId = target.userId || entry.actorId || ''
+  if (!/^usr_/i.test(String(userId))) return
+  if (sync.requestSyncByVrchat(userId, `group ${category} event`)) {
+    log.debug(`Queued role sync for ${userId} after a ${category} event`)
+  }
+}
+
 async function sendToChannel(channelId, payload, mentionIds = []) {
   if (!clientRef || !channelId) return null
   const channel = clientRef.channels.cache.get(channelId)
@@ -397,6 +413,7 @@ async function poll() {
       if (posted >= MAX_POSTS_PER_CYCLE) break
 
       const { category, embed, components, actionable, record, content, mentionIds } = await buildEmbed(entry)
+      queueRoleSync(entry, category)
       const channelId = channelFor(category)
       if (channelId) {
         try {
@@ -443,7 +460,9 @@ function start(client) {
   clientRef = client
   if (pollTimer) return
 
-  if (!anyChannelConfigured()) {
+  // Even with no log channels the poll earns its one call a minute: it is what tells the role sync that group roles moved.
+  const posting = anyChannelConfigured()
+  if (!posting && config.simpleMode) {
     log.info('No group log channels set in config.yml; audit log feed disabled.')
     return
   }
@@ -454,7 +473,9 @@ function start(client) {
   }
 
   const intervalMs = config.groupLogs.pollSeconds * 1000
-  log.info(`Group audit log feed on, polling every ${config.groupLogs.pollSeconds}s.`)
+  log.info(posting
+    ? `Group audit log feed on, polling every ${config.groupLogs.pollSeconds}s.`
+    : `No group log channels set; polling the audit log every ${config.groupLogs.pollSeconds}s for role sync only.`)
   poll()
   pollTimer = setInterval(poll, intervalMs)
   pollTimer.unref?.()

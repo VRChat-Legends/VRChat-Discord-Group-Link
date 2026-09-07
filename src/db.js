@@ -78,6 +78,16 @@ function getDb() {
       value TEXT NOT NULL DEFAULT ''
     );
 
+    -- Cached VRChat profile facts, so a full role pass costs no API calls.
+    CREATE TABLE IF NOT EXISTS profile_cache (
+      vrchat_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL DEFAULT '',
+      trust_key TEXT NOT NULL DEFAULT 'visitor',
+      vrc_plus INTEGER NOT NULL DEFAULT 0,
+      age_18 INTEGER NOT NULL DEFAULT 0,
+      fetched_at INTEGER NOT NULL DEFAULT 0
+    );
+
     -- Moderation records behind the reason menu / Request Ban controls
     CREATE TABLE IF NOT EXISTS moderation_logs (
       log_id TEXT PRIMARY KEY,
@@ -142,8 +152,24 @@ function createLink(discordId, vrchatId, vrchatName) {
 
 function deleteLink(discordId) {
   const db2 = getDb()
+  const existing = getLinkByDiscord(discordId)
   db2.prepare('DELETE FROM role_state WHERE discord_id = ?').run(String(discordId))
+  if (existing) db2.prepare('DELETE FROM profile_cache WHERE vrchat_id = ?').run(existing.vrchat_id)
+  db2.prepare('DELETE FROM kv WHERE key = ?').run(`in_group:${discordId}`)
   return db2.prepare('DELETE FROM links WHERE discord_id = ?').run(String(discordId)).changes > 0
+}
+
+function countLinks() {
+  return Number(getDb().prepare('SELECT COUNT(*) AS n FROM links').get()?.n || 0)
+}
+
+// Links with the oldest profile refresh first, so the rotating fetch always spends its calls where they are due.
+function listLinksByProfileAge(limit) {
+  return getDb()
+    .prepare(`SELECT l.discord_id, l.vrchat_id, l.vrchat_name, IFNULL(p.fetched_at, 0) AS fetched_at
+      FROM links l LEFT JOIN profile_cache p ON p.vrchat_id = l.vrchat_id
+      ORDER BY fetched_at ASC LIMIT ?`)
+    .all(Number(limit))
 }
 
 // ---------------------------------------------------------------
@@ -273,6 +299,39 @@ function setKv(key, value) {
 }
 
 // ---------------------------------------------------------------
+// cached profile facts
+// ---------------------------------------------------------------
+
+function getProfileFacts(vrchatId) {
+  const row = getDb().prepare('SELECT * FROM profile_cache WHERE vrchat_id = ?').get(String(vrchatId))
+  if (!row) return null
+  return {
+    vrchatId: row.vrchat_id,
+    displayName: row.display_name,
+    trustKey: row.trust_key,
+    vrcPlus: Boolean(row.vrc_plus),
+    age18: Boolean(row.age_18),
+    fetchedAt: Number(row.fetched_at),
+  }
+}
+
+function setProfileFacts(vrchatId, { displayName, trustKey, vrcPlus, age18 }) {
+  getDb()
+    .prepare(`INSERT OR REPLACE INTO profile_cache
+      (vrchat_id, display_name, trust_key, vrc_plus, age_18, fetched_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(
+      String(vrchatId), String(displayName || ''), String(trustKey || 'visitor'),
+      vrcPlus ? 1 : 0, age18 ? 1 : 0, Date.now()
+    )
+}
+
+function countFreshProfiles(ttlMs) {
+  return Number(getDb()
+    .prepare('SELECT COUNT(*) AS n FROM profile_cache WHERE fetched_at > ?')
+    .get(Date.now() - Number(ttlMs))?.n || 0)
+}
+
+// ---------------------------------------------------------------
 // moderation logs
 // ---------------------------------------------------------------
 
@@ -324,6 +383,8 @@ module.exports = {
   listLinks,
   createLink,
   deleteLink,
+  countLinks,
+  listLinksByProfileAge,
   saveLinkCode,
   getLinkCode,
   deleteLinkCode,
@@ -341,6 +402,9 @@ module.exports = {
   getMiscRoles,
   getKv,
   setKv,
+  getProfileFacts,
+  setProfileFacts,
+  countFreshProfiles,
   saveModerationLog,
   getModerationLog,
   setModerationReason,

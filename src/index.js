@@ -101,6 +101,16 @@ function main() {
     )
   })
 
+  // A linked member rejoining gets their roles back without waiting.
+  client.on(Events.GuildMemberAdd, (member) => {
+    if (member.guild.id !== config.discord.guildId) return
+    try {
+      sync.onMemberAdd(member)
+    } catch (err) {
+      log.warn('member join sync failed:', err.message)
+    }
+  })
+
   client.on(Events.Error, (err) => log.error('Client error:', err.message))
 
   process.on('unhandledRejection', (err) => {

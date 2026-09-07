@@ -6,6 +6,7 @@
 const crypto = require('crypto')
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
@@ -21,6 +22,7 @@ const db = require('./db')
 const logger = require('./logger')
 const vrc = require('./vrchatApi')
 const sync = require('./sync')
+const roster = require('./roster')
 const discordLog = require('./discordLog')
 const groupLogs = require('./groupLogs')
 const feeds = require('./feeds')
@@ -467,13 +469,359 @@ async function handleTrack(interaction) {
 }
 
 // ---------------------------------------------------------------
+// /whois
+// ---------------------------------------------------------------
+
+async function handleWhois(interaction) {
+  const target = interaction.options.getUser('member') || interaction.user
+  const link = db.getLinkByDiscord(target.id)
+  if (!link) {
+    await interaction.reply({
+      flags: MessageFlags.Ephemeral,
+      content: target.id === interaction.user.id
+        ? 'You have not linked a VRChat account yet. Run **/link** to connect one.'
+        : `<@${target.id}> has not linked a VRChat account.`,
+    })
+    return
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const facts = db.getProfileFacts(link.vrchat_id)
+  const groupMember = roster.get(link.vrchat_id)
+  const member = await interaction.guild?.members.fetch(target.id).catch(() => null)
+  const miscRoles = db.getMiscRoles()
+  const held = Object.entries(miscRoles)
+    .filter(([, roleId]) => member?.roles.cache.has(roleId))
+    .map(([, roleId]) => `<@&${roleId}>`)
+  const linkedHeld = db.listLinkedRoles()
+    .filter((p) => member?.roles.cache.has(p.discord_role_id))
+    .map((p) => `<@&${p.discord_role_id}>`)
+
+  const linkedAt = Date.parse(link.linked_at || '')
+  const joinedAt = Date.parse(groupMember?.joinedAt || '')
+  const rank = vrc.TRUST_RANKS.find((r) => r.key === facts?.trustKey)
+
+  const fields = [
+    { name: 'Discord', value: `<@${target.id}>`, inline: true },
+    {
+      name: 'VRChat',
+      value: `[${link.vrchat_name || link.vrchat_id}](https://vrchat.com/home/user/${link.vrchat_id})`,
+      inline: true,
+    },
+    { name: 'VRChat ID', value: `\`${link.vrchat_id}\``, inline: false },
+  ]
+  if (Number.isFinite(linkedAt)) fields.push({ name: 'Linked', value: `<t:${Math.floor(linkedAt / 1000)}:R>`, inline: true })
+  if (groupMember) {
+    fields.push({ name: 'In the group', value: Number.isFinite(joinedAt) ? `since <t:${Math.floor(joinedAt / 1000)}:D>` : 'yes', inline: true })
+    fields.push({ name: 'Representing', value: groupMember.isRepresenting ? 'Yes' : 'No', inline: true })
+  } else {
+    fields.push({ name: 'In the group', value: roster.isFresh() ? 'No' : 'Unknown right now', inline: true })
+  }
+  if (facts) {
+    fields.push({ name: 'Trust rank', value: rank?.label || facts.trustKey, inline: true })
+    fields.push({ name: 'VRC+', value: facts.vrcPlus ? 'Yes' : 'No', inline: true })
+    fields.push({ name: '18+ verified', value: facts.age18 ? 'Yes' : 'No', inline: true })
+  }
+  fields.push({ name: 'Profile roles', value: held.join(' ') || 'None', inline: false })
+  if (db.listLinkedRoles().length) {
+    fields.push({ name: 'Synced roles', value: linkedHeld.join(' ') || 'None', inline: false })
+  }
+
+  await interaction.editReply({
+    embeds: [{
+      title: `Link for ${target.username}`.slice(0, 256),
+      color: EMBED_COLOR,
+      fields,
+      footer: facts ? { text: `Profile last read ${Math.round((Date.now() - facts.fetchedAt) / 60000)} min ago` } : undefined,
+      timestamp: new Date().toISOString(),
+    }],
+  })
+}
+
+// ---------------------------------------------------------------
+// /force-link and /force-unlink
+// ---------------------------------------------------------------
+
+async function handleForceLink(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const target = interaction.options.getUser('member', true)
+  const query = interaction.options.getString('vrchat_user', true).trim()
+
+  const existing = db.getLinkByDiscord(target.id)
+  if (existing) {
+    await interaction.editReply(`<@${target.id}> is already linked to **${existing.vrchat_name || existing.vrchat_id}**. Run **/force-unlink** first.`)
+    return
+  }
+
+  let user
+  try {
+    user = await vrc.resolveUser(query)
+  } catch (err) {
+    log.warn('/force-link lookup failed:', err.message)
+    await interaction.editReply('VRChat lookup failed. Try again in a moment.')
+    return
+  }
+  if (!user?.id) {
+    await interaction.editReply(`No VRChat user found for **${query}**. Paste the full \`usr_...\` id if the name does not resolve.`)
+    return
+  }
+
+  // One VRChat account, one Discord account: a second claim would leave two members syncing off the same group membership.
+  const taken = db.getLinkByVrchat(user.id)
+  if (taken) {
+    await interaction.editReply(`**${user.displayName}** is already linked to <@${taken.discord_id}>. Unlink them first.`)
+    return
+  }
+
+  db.createLink(target.id, user.id, user.displayName)
+  db.deleteLinkCode(target.id)
+  log.info(`Force linked ${target.tag || target.username} <-> ${user.displayName} (${user.id}) by ${interaction.user.tag}`)
+  discordLog.logLink(target.id, user.displayName, user.id, user)
+  discordLog.logAlert(
+    'Link created by an admin',
+    `<@${interaction.user.id}> linked <@${target.id}> to **${user.displayName}** (\`${user.id}\`) without the status code check.`
+  )
+
+  await interaction.editReply(`Linked <@${target.id}> to **${user.displayName}**. Syncing their roles now.`)
+  sync.syncOneUser(interaction.client, target.id, { verify: true, refreshProfile: true })
+    .catch((err) => log.warn('force-link sync failed:', err.message))
+}
+
+async function handleForceUnlink(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const target = interaction.options.getUser('member', true)
+  const existing = db.getLinkByDiscord(target.id)
+  if (!existing) {
+    await interaction.editReply(`<@${target.id}> is not linked to any VRChat account.`)
+    return
+  }
+
+  try {
+    await sync.removeMiscRoles(interaction.client, target.id)
+  } catch (err) {
+    log.warn('force-unlink role cleanup failed:', err.message)
+  }
+
+  db.deleteLink(target.id)
+  db.deleteLinkCode(target.id)
+  log.info(`Force unlinked ${target.tag || target.username} from ${existing.vrchat_name || existing.vrchat_id} by ${interaction.user.tag}`)
+  discordLog.logUnlink(target.id, existing.vrchat_name || existing.vrchat_id, existing.vrchat_id)
+  discordLog.logAlert(
+    'Link removed by an admin',
+    `<@${interaction.user.id}> unlinked <@${target.id}> from **${existing.vrchat_name || existing.vrchat_id}**.`
+  )
+
+  await interaction.editReply(`Unlinked <@${target.id}> from **${existing.vrchat_name || existing.vrchat_id}** and took back the profile roles.`)
+}
+
+// ---------------------------------------------------------------
+// /links and /unlinked
+// ---------------------------------------------------------------
+
+const LINKS_PER_PAGE = 15
+
+// A custom_id is capped at 100 characters, so the filter text lives here and the button carries only a short token.
+const linkQueryTokens = new Map()
+
+function rememberQuery(query) {
+  if (!query) return '-'
+  const token = crypto.randomBytes(4).toString('hex')
+  const cutoff = Date.now() - 3_600_000
+  for (const [key, entry] of linkQueryTokens) {
+    if (entry.at < cutoff) linkQueryTokens.delete(key)
+  }
+  linkQueryTokens.set(token, { query, at: Date.now() })
+  return token
+}
+
+function recallQuery(token) {
+  return token && token !== '-' ? (linkQueryTokens.get(token)?.query || '') : ''
+}
+
+function linksPage(rows, offset, query, token) {
+  const page = rows.slice(offset, offset + LINKS_PER_PAGE)
+  const lines = page.map((l, i) => {
+    const inGroup = roster.isLoaded() ? (roster.has(l.vrchat_id) ? '' : ' | not in the group') : ''
+    return `**${offset + i + 1}.** <@${l.discord_id}> to [${l.vrchat_name || l.vrchat_id}](https://vrchat.com/home/user/${l.vrchat_id})${inGroup}`
+  })
+  const hasNext = offset + LINKS_PER_PAGE < rows.length
+
+  return {
+    embeds: [{
+      title: query ? `Links matching "${query}"`.slice(0, 256) : 'Discord to VRChat links',
+      color: EMBED_COLOR,
+      description: lines.join('\n') || 'No links on this page.',
+      footer: { text: `${rows.length} link${rows.length === 1 ? '' : 's'} total` },
+      timestamp: new Date().toISOString(),
+    }],
+    components: [{
+      type: 1,
+      components: [
+        { type: 2, style: 2, custom_id: `links_page:${Math.max(0, offset - LINKS_PER_PAGE)}:${token}`, label: 'Previous', disabled: offset <= 0 },
+        { type: 2, style: 2, custom_id: `links_page:${offset + LINKS_PER_PAGE}:${token}`, label: 'Next', disabled: !hasNext },
+      ],
+    }],
+  }
+}
+
+function matchingLinks(query) {
+  const needle = String(query || '').trim().toLowerCase()
+  const rows = db.listLinks()
+  if (!needle) return rows
+  return rows.filter((l) =>
+    String(l.vrchat_name || '').toLowerCase().includes(needle)
+    || String(l.vrchat_id).toLowerCase().includes(needle)
+    || String(l.discord_id).includes(needle)
+  )
+}
+
+async function handleLinks(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  const query = interaction.options.getString('query')?.trim() || ''
+  const rows = matchingLinks(query)
+  if (!rows.length) {
+    await interaction.reply({
+      flags: MessageFlags.Ephemeral,
+      content: query ? `No links match **${query}**.` : 'Nobody has linked a VRChat account yet.',
+    })
+    return
+  }
+  await interaction.reply({ ...linksPage(rows, 0, query, rememberQuery(query)), flags: MessageFlags.Ephemeral })
+}
+
+async function handleLinksPageButton(interaction) {
+  const [, rawOffset, token] = interaction.customId.split(':')
+  const query = recallQuery(token)
+  const offset = Math.max(0, Number(rawOffset) || 0)
+  await interaction.update(linksPage(matchingLinks(query), offset, query, token))
+}
+
+async function handleUnlinked(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const roleFilter = interaction.options.getRole('role')
+  const members = await interaction.guild.members.fetch().catch(() => null)
+  if (!members) {
+    await interaction.editReply('I could not read the member list. Check that the **Server Members Intent** is on in the Discord developer portal.')
+    return
+  }
+
+  const candidates = [...members.values()].filter((m) =>
+    !m.user.bot
+    && !db.getLinkByDiscord(m.id)
+    && (!roleFilter || m.roles.cache.has(roleFilter.id))
+  )
+
+  if (!candidates.length) {
+    await interaction.editReply(roleFilter
+      ? `Everyone with ${roleFilter} has linked a VRChat account.`
+      : 'Everyone in the server has linked a VRChat account.')
+    return
+  }
+
+  const preview = candidates.slice(0, 20).map((m) => `<@${m.id}>`).join(' ')
+  const files = []
+  if (candidates.length > 20) {
+    const text = candidates.map((m) => `${m.user.tag} | ${m.id}`).join('\n')
+    files.push(new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: 'unlinked-members.txt' }))
+  }
+
+  const total = members.filter((m) => !m.user.bot).size
+  await interaction.editReply({
+    embeds: [{
+      title: 'Members with no VRChat link',
+      color: EMBED_COLOR,
+      description: preview,
+      fields: [
+        { name: 'Unlinked', value: String(candidates.length), inline: true },
+        { name: 'Linked', value: String(db.countLinks()), inline: true },
+        { name: 'Coverage', value: total ? `${Math.round(((total - candidates.length) / total) * 100)}%` : 'unknown', inline: true },
+      ],
+      footer: candidates.length > 20 ? { text: `Showing 20 of ${candidates.length}; full list attached` } : undefined,
+      timestamp: new Date().toISOString(),
+    }],
+    files,
+  })
+}
+
+// ---------------------------------------------------------------
+// /sync-status
+// ---------------------------------------------------------------
+
+function since(ms) {
+  if (!ms) return 'never'
+  return `<t:${Math.floor(ms / 1000)}:R>`
+}
+
+async function handleSyncStatus(interaction) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({ content: 'Administrator permission required.', flags: MessageFlags.Ephemeral })
+    return
+  }
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
+  const s = sync.status()
+  const r = s.roster
+  const rosterLine = r.loadedAt
+    ? `${r.size} members, read ${Math.round(r.ageMs / 1000)}s ago in ${r.lastCalls} call${r.lastCalls === 1 ? '' : 's'}${r.complete ? '' : ' (hit the page cap)'}`
+    : `never loaded${r.lastError ? `: ${r.lastError}` : ''}`
+
+  const fields = [
+    { name: 'Links', value: String(s.links), inline: true },
+    { name: 'Role pairs', value: String(s.pairs), inline: true },
+    { name: 'Profiles cached', value: `${s.freshProfiles} of ${s.links} fresh`, inline: true },
+    { name: 'Last pass', value: s.lastCycleAt ? `${since(s.lastCycleAt)}, ${s.lastChecked} checked, ${s.lastChanged} changed, ${s.lastCycleMs}ms` : 'not yet', inline: false },
+    { name: 'Group member list', value: rosterLine, inline: false },
+    { name: 'Event queue', value: `${s.queued} waiting, ${s.eventsHandled} handled since start`, inline: true },
+    { name: 'Passes run', value: String(s.cycles), inline: true },
+    { name: 'Running now', value: s.running ? 'Yes' : 'No', inline: true },
+    { name: 'Interval', value: `every ${s.intervalSeconds}s`, inline: true },
+    { name: 'Conflicts', value: `${s.conflictWinner} wins`, inline: true },
+    { name: 'Paused by VRChat', value: `${s.hierarchyBlocked} member${s.hierarchyBlocked === 1 ? '' : 's'}`, inline: true },
+  ]
+  if (s.lastError) fields.push({ name: 'Last error', value: String(s.lastError).slice(0, 1024), inline: false })
+
+  await interaction.editReply({
+    embeds: [{
+      title: 'Role sync status',
+      color: s.lastError || !r.loadedAt ? 0xff8800 : EMBED_COLOR,
+      description: r.loadedAt
+        ? 'Every linked member is checked against the cached group roster on each pass, and group events sync within seconds.'
+        : 'The group member list has not loaded, so the bot is falling back to checking a few members per pass. The VRChat account needs a group role that can view all members.',
+      fields,
+      timestamp: new Date().toISOString(),
+    }],
+  })
+}
+
+// ---------------------------------------------------------------
 // /help
 // ---------------------------------------------------------------
 
 const HELP_MEMBER = [
-  ['/link', 'Link your Discord to your VRChat account. You get a short code, put it in your VRChat bio, then press Verify.'],
+  ['/link', 'Link your Discord to your VRChat account. You get a short code, put it in your VRChat status, then press Verify.'],
   ['/unlink', 'Break the link and drop the roles the bot gave you.'],
+  ['/whois', 'See which VRChat account a member is linked to, and the roles that came from it.'],
   ['/get-member-info', 'Look up a VRChat member: trust rank, VRC+, 18+, group roles, join date, bio, and their Discord link.'],
+  ['/group-info', 'Live group numbers: members, who is in an instance, join type, and when it was made.'],
   ['/ping', 'Bot latency, VRChat login status, and link counts.'],
   ['/help', 'This message.'],
 ]
@@ -485,7 +833,16 @@ const HELP_ADMIN_SETUP = [
   ['/set-linked-role', 'Mirror a Discord role to a VRChat group role, both directions.'],
   ['/remove-linked-role', 'Stop mirroring a Discord role.'],
   ['/list-linked-roles', 'Show every mirrored role pair.'],
-  ['/track', 'Create a stat tracker voice channel (members, online, and friends).'],
+  ['/track', 'Create a stat tracker voice channel (group members, users in instances, open instances, linked members).'],
+]
+
+const HELP_ADMIN_LINKS = [
+  ['/force-link', 'Link a member to a VRChat account yourself, skipping the status code step.'],
+  ['/force-unlink', 'Remove someone else\'s link and take back the roles it granted.'],
+  ['/links', 'Browse every link, with a filter and paging.'],
+  ['/unlinked', 'List members who never linked, optionally narrowed to one role.'],
+  ['/sync-status', 'How the sync engine is doing: last pass, roster age, queue, and anything blocking it.'],
+  ['/recheck-roles', 'Force a pass now, for one member or everyone.'],
 ]
 
 const HELP_ADMIN_MOD = [
@@ -494,8 +851,10 @@ const HELP_ADMIN_MOD = [
   ['/vrc-unban', 'Lift a group ban. Paste the usr_ id if the name will not resolve.'],
   ['/vrc-bans', 'Browse the ban list ten at a time.'],
   ['/vrc-search', 'Search group members by name.'],
+  ['/vrc-role-members', 'List everyone holding a VRChat group role, and who they are on Discord.'],
+  ['/vrc-invite', 'Send a group invite to a VRChat user.'],
+  ['/vrc-post', 'Create a post in the VRChat group, for members or public.'],
   ['/audit-members', 'Cross check the whole group against the Discord links and the ban list.'],
-  ['/recheck-roles', 'Force a profile role recheck and report anything blocking it.'],
 ]
 
 function helpLines(rows) {
@@ -514,6 +873,7 @@ async function handleHelp(interaction) {
           { name: 'What it posts', value: 'Group audit logs (warns, kicks, bans, joins, leaves, roles, and more), group posts and announcements, and new join requests, each in its own channel.', inline: false },
           { name: 'Commands', value: helpLines([
             ['/get-member-info', 'Look up a VRChat member: trust rank, VRC+, 18+, group roles, join date, and bio.'],
+            ['/group-info', 'Live group numbers.'],
             ['/setup-log-channels', 'Admin. Create every log channel inside a category and save the IDs.'],
             ['/track', 'Admin. Create a stat tracker voice channel.'],
             ['/ping', 'Bot latency and VRChat login status.'],
@@ -533,6 +893,7 @@ async function handleHelp(interaction) {
 
   if (isAdmin) {
     fields.push({ name: 'Setup (admin)', value: helpLines(HELP_ADMIN_SETUP), inline: false })
+    fields.push({ name: 'Links and sync (admin)', value: helpLines(HELP_ADMIN_LINKS), inline: false })
   }
   if (isAdmin || isMod) {
     fields.push({ name: 'Moderation', value: helpLines(HELP_ADMIN_MOD), inline: false })
@@ -542,7 +903,8 @@ async function handleHelp(interaction) {
     name: 'Other things it does on its own',
     value: [
       'Right click any member, Apps, **VRChat Profile** to see their linked account.',
-      'Profile roles (18+, VRC+, trust rank, repping, tenure) are rechecked automatically for every linked member.',
+      'Profile roles (18+, VRC+, trust rank, repping, tenure) are rechecked for every linked member on every pass.',
+      'Role changes made in VRChat are picked up from the group audit log and mirrored within seconds; changes made in Discord are pushed to VRChat instantly.',
       'Group audit logs, group posts, and join requests are posted to the log channels, with action buttons on warns, kicks, and bans.',
     ].join('\n'),
     inline: false,
@@ -1283,7 +1645,7 @@ async function handleModBan(interaction) {
 
 // Everything simple mode switches off. Old messages can still carry these
 // buttons, so answer them politely instead of doing nothing.
-const SIMPLE_MODE_ALLOWED = new Set(['get-member-info', 'setup-log-channels', 'track', 'ping', 'help'])
+const SIMPLE_MODE_ALLOWED = new Set(['get-member-info', 'setup-log-channels', 'track', 'group-info', 'ping', 'help'])
 
 async function denyInSimpleMode(interaction) {
   if (!config.simpleMode) return false
@@ -1297,9 +1659,12 @@ async function denyInSimpleMode(interaction) {
   return true
 }
 
+// Commands whose vrchat_role option is filled from the live group roles.
+const ROLE_AUTOCOMPLETE_COMMANDS = new Set(['set-linked-role', 'vrc-role-members'])
+
 async function handleInteraction(interaction) {
   if (interaction.isAutocomplete()) {
-    if (interaction.commandName === 'set-linked-role') await handleVrchatRoleAutocomplete(interaction)
+    if (ROLE_AUTOCOMPLETE_COMMANDS.has(interaction.commandName)) await handleVrchatRoleAutocomplete(interaction)
     return
   }
 
@@ -1317,6 +1682,7 @@ async function handleInteraction(interaction) {
     else if (id === 'mod_cancel') await vrcAdmin.handleModCancel(interaction)
     else if (id.startsWith('jr_')) await vrcAdmin.handleJoinRequestButton(interaction)
     else if (id.startsWith('bans_page:')) await vrcAdmin.handleBansPageButton(interaction)
+    else if (id.startsWith('links_page:')) await handleLinksPageButton(interaction)
     else if (id.startsWith('setuplog:')) await handleLogSetupChoice(interaction)
     else if (id.startsWith('setupmisc:')) await handleMiscSetupChoice(interaction)
     return
@@ -1344,20 +1710,30 @@ async function handleInteraction(interaction) {
   const handlers = {
     link: handleLink,
     unlink: handleUnlink,
+    whois: handleWhois,
     'set-linked-role': handleSetLinkedRole,
     'remove-linked-role': handleRemoveLinkedRole,
     'list-linked-roles': handleListLinkedRoles,
     track: handleTrack,
     ping: handlePing,
     'get-member-info': handleGetMemberInfo,
+    'group-info': vrcAdmin.handleGroupInfo,
     'setup-misc-roles': handleSetupMiscRoles,
     'setup-log-channels': handleSetupLogChannels,
     'link-panel': handleLinkPanel,
+    'force-link': handleForceLink,
+    'force-unlink': handleForceUnlink,
+    links: handleLinks,
+    unlinked: handleUnlinked,
+    'sync-status': handleSyncStatus,
     'vrc-ban': vrcAdmin.handleVrcBan,
     'vrc-kick': vrcAdmin.handleVrcKick,
     'vrc-unban': vrcAdmin.handleVrcUnban,
     'vrc-bans': vrcAdmin.handleVrcBans,
     'vrc-search': vrcAdmin.handleVrcSearch,
+    'vrc-role-members': vrcAdmin.handleVrcRoleMembers,
+    'vrc-invite': vrcAdmin.handleVrcInvite,
+    'vrc-post': vrcAdmin.handleVrcPost,
     'audit-members': vrcAdmin.handleAuditMembers,
     'recheck-roles': vrcAdmin.handleRecheckRoles,
     help: handleHelp,

@@ -29,6 +29,31 @@ presence:
   - { type: watching, text: "the group | /link" }
   - { type: listening, text: "/ping" }
 
+# Role sync tuning. The defaults suit groups up to about 25,000 members;
+# raise the intervals rather than lowering them if you run several bots on
+# one VRChat account.
+sync:
+  # How often the whole group member list is re-read, in seconds. It costs
+  # one VRChat call per 100 members, and every linked member is checked
+  # against it every cycle, so role changes made in VRChat land quickly.
+  roster_refresh_seconds: 900
+  # Stop paging the member list after this many members.
+  roster_max_members: 25000
+  # How many VRChat profiles are refreshed per cycle. Trust rank, VRC+,
+  # and 18+ need one call each, so they rotate and are cached in between.
+  profiles_per_cycle: 12
+  # How long a cached profile is trusted before it is due for a refresh.
+  profile_ttl_hours: 12
+  # How often the queue of members flagged by a group event is drained.
+  event_drain_seconds: 5
+  # Who wins when a role changed on both sides inside the same window.
+  # discord | vrchat
+  conflict_winner: discord
+  # The first time the bot sees a member, holding the role on either side
+  # grants it on the other. Set to false to only ever mirror changes the
+  # bot itself has recorded.
+  grant_on_first_sight: true
+
 # VRChat group audit log feed: the bot polls your group's audit log and
 # posts an embed for every event into the channel set for its category.
 # A category with no channel falls back to default_channel_id; if that is

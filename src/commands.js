@@ -74,6 +74,7 @@ function buildCommands() {
         { name: 'Group members', value: 'group_members' },
         { name: 'Users in instances', value: 'users_in_instances' },
         { name: 'Open instances', value: 'open_instances' },
+        { name: 'Linked members', value: 'linked_members' },
       ))
     .addStringOption((o) => o
       .setName('name')
@@ -208,6 +209,112 @@ function buildCommands() {
     .setName('VRChat Profile')
     .setType(ApplicationCommandType.User)
 
+  const whois = new SlashCommandBuilder()
+    .setName('whois')
+    .setDescription('Show the VRChat account a Discord member is linked to')
+    .addUserOption((o) => o
+      .setName('member')
+      .setDescription('The Discord member (defaults to you)')
+      .setRequired(false))
+
+  const forceLink = new SlashCommandBuilder()
+    .setName('force-link')
+    .setDescription('Link a Discord member to a VRChat account without the status code step')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption((o) => o
+      .setName('member')
+      .setDescription('The Discord member')
+      .setRequired(true))
+    .addStringOption((o) => o
+      .setName('vrchat_user')
+      .setDescription('VRChat display name or usr_ ID')
+      .setRequired(true)
+      .setMaxLength(64))
+
+  const forceUnlink = new SlashCommandBuilder()
+    .setName('force-unlink')
+    .setDescription('Remove a member\'s VRChat link and take back the roles it granted')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption((o) => o
+      .setName('member')
+      .setDescription('The Discord member')
+      .setRequired(true))
+
+  const links = new SlashCommandBuilder()
+    .setName('links')
+    .setDescription('Browse every Discord to VRChat link')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('query')
+      .setDescription('Filter by VRChat name or ID')
+      .setMaxLength(64)
+      .setRequired(false))
+
+  const unlinked = new SlashCommandBuilder()
+    .setName('unlinked')
+    .setDescription('List Discord members who have not linked a VRChat account')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addRoleOption((o) => o
+      .setName('role')
+      .setDescription('Only members with this role')
+      .setRequired(false))
+
+  const syncStatus = new SlashCommandBuilder()
+    .setName('sync-status')
+    .setDescription('How the role sync engine is doing right now')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+
+  const vrcRoleMembers = new SlashCommandBuilder()
+    .setName('vrc-role-members')
+    .setDescription('List everyone holding a VRChat group role')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('vrchat_role')
+      .setDescription('The VRChat group role (start typing to search)')
+      .setRequired(true)
+      .setAutocomplete(true))
+
+  const vrcInvite = new SlashCommandBuilder()
+    .setName('vrc-invite')
+    .setDescription('Send a VRChat group invite to a user')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('user')
+      .setDescription('VRChat display name or usr_ ID')
+      .setRequired(true)
+      .setMaxLength(64))
+
+  const vrcPost = new SlashCommandBuilder()
+    .setName('vrc-post')
+    .setDescription('Create a post in the VRChat group')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption((o) => o
+      .setName('title')
+      .setDescription('Post title')
+      .setRequired(true)
+      .setMaxLength(200))
+    .addStringOption((o) => o
+      .setName('text')
+      .setDescription('Post body')
+      .setRequired(true)
+      .setMaxLength(2000))
+    .addStringOption((o) => o
+      .setName('visibility')
+      .setDescription('Who can see it (default: group members)')
+      .setRequired(false)
+      .addChoices(
+        { name: 'Group members', value: 'group' },
+        { name: 'Public', value: 'public' },
+      ))
+    .addBooleanOption((o) => o
+      .setName('notify')
+      .setDescription('Send a notification to group members (default: no)')
+      .setRequired(false))
+
+  const groupInfo = new SlashCommandBuilder()
+    .setName('group-info')
+    .setDescription('Live numbers and details for the VRChat group')
+
   // Simple mode is a log relay: only the commands that read or set up the
   // log channels get registered, so nothing unusable shows up in Discord.
   if (config.simpleMode) {
@@ -215,6 +322,7 @@ function buildCommands() {
       getMemberInfo,
       setupLogChannels,
       track,
+      groupInfo,
       ping,
       help,
     ].map((c) => c.toJSON())
@@ -223,20 +331,30 @@ function buildCommands() {
   return [
     link,
     unlink,
+    whois,
     setLinkedRole,
     removeLinkedRole,
     listLinkedRoles,
     track,
     ping,
     getMemberInfo,
+    groupInfo,
     setupMiscRoles,
     setupLogChannels,
     linkPanel,
+    forceLink,
+    forceUnlink,
+    links,
+    unlinked,
+    syncStatus,
     vrcBan,
     vrcKick,
     vrcUnban,
     vrcBans,
     vrcSearch,
+    vrcRoleMembers,
+    vrcInvite,
+    vrcPost,
     auditMembers,
     recheckRoles,
     help,

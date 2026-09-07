@@ -158,18 +158,33 @@ async function getGroupAuditLogs({ startDate, n = 100, offset = 0 } = {}) {
 // ---------------------------------------------------------------
 
 /**
- * A page of group members. sort accepts VRChat's values such as
- * 'joinedAt:desc'; search does a name match server side.
+ * A page of group members. sort is 'joinedAt:asc' or 'joinedAt:desc';
+ * roleId narrows the page to holders of one group role. Name matching is a
+ * different endpoint, see searchGroupMembers.
  */
-async function getGroupMembers({ n = 100, offset = 0, sort, search, roleId } = {}) {
+async function getGroupMembers({ n = 100, offset = 0, sort, roleId } = {}) {
   const params = new URLSearchParams()
   params.set('n', String(Math.min(100, Math.max(1, n))))
   params.set('offset', String(offset))
   if (sort) params.set('sort', sort)
-  if (search) params.set('search', search)
   if (roleId) params.set('roleId', roleId)
   const data = await authedRequest('GET', `/groups/${encodeURIComponent(config.vrchat.groupId)}/members?${params}`)
   return Array.isArray(data) ? data : []
+}
+
+/** Group members whose display name matches. VRChat wants 3+ characters. */
+async function searchGroupMembers(query, { n = 10, offset = 0 } = {}) {
+  const params = new URLSearchParams({
+    query: String(query || ''),
+    n: String(Math.min(100, Math.max(1, n))),
+    offset: String(offset),
+  })
+  const data = await authedRequest(
+    'GET',
+    `/groups/${encodeURIComponent(config.vrchat.groupId)}/members/search?${params}`
+  )
+  if (Array.isArray(data)) return data
+  return Array.isArray(data?.results) ? data.results : []
 }
 
 async function getGroupBans({ n = 100, offset = 0 } = {}) {
@@ -226,6 +241,25 @@ function respondToJoinRequest(userId, action, { block = false } = {}) {
   )
 }
 
+/** Invite a user to the group. */
+function createGroupInvite(userId, { confirmOverrideBlock = false } = {}) {
+  return authedRequest('POST', `/groups/${encodeURIComponent(config.vrchat.groupId)}/invites`, {
+    body: { userId: String(userId), confirmOverrideBlock: Boolean(confirmOverrideBlock) },
+  })
+}
+
+/** Create a group post. visibility is 'group' or 'public'. */
+function createGroupPost({ title, text, visibility = 'group', sendNotification = false, roleIds } = {}) {
+  const body = {
+    title: String(title || '').slice(0, 200),
+    text: String(text || '').slice(0, 2000),
+    visibility: visibility === 'public' ? 'public' : 'group',
+    sendNotification: Boolean(sendNotification),
+  }
+  if (Array.isArray(roleIds) && roleIds.length) body.roleIds = roleIds
+  return authedRequest('POST', `/groups/${encodeURIComponent(config.vrchat.groupId)}/posts`, { body })
+}
+
 // ---------------------------------------------------------------
 // profile parsing helpers
 // ---------------------------------------------------------------
@@ -270,6 +304,7 @@ module.exports = {
   getGroupInstances,
   getGroupAuditLogs,
   getGroupMembers,
+  searchGroupMembers,
   getGroupBans,
   banGroupMember,
   unbanGroupMember,
@@ -278,6 +313,8 @@ module.exports = {
   getGroupAnnouncement,
   getJoinRequests,
   respondToJoinRequest,
+  createGroupInvite,
+  createGroupPost,
   getTrustRank,
   hasVrcPlus,
   isAgeVerified18Plus,
