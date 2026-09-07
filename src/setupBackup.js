@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // JSON backup of everything the setup commands create: the log channel id

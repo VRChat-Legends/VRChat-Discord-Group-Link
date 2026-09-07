@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // Two way linked role sync, profile based misc roles, and stat tracker channels, driven off a cached roster so a full pass is free.

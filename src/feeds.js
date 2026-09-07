@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // Extra VRChat group feeds: new group posts and announcements mirrored to

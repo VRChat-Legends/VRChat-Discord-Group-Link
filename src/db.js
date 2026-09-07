@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // Storage for VRChat-Discord Group Link. Uses node:sqlite (built into Node

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // Admin tooling that talks to the VRChat group: real ban, kick, and unban,

@@ -1,0 +1,72 @@
+VRChat-Discord-Group-Link
+Copyright (C) 2026 VRChat Legends
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Source code: https://github.com/VRChat-Legends/VRChat-Discord-Group-Link
+
+
+NETWORK USE (AGPL SECTION 13)
+
+This program is normally run as a network service that other people talk to
+through Discord. Section 13 is the reason this project is AGPL and not GPL: a
+hosted bot is never "distributed" to its users, so a plain GPL would let a
+closed source fork run in public with no obligations at all.
+
+If you modify this program and let anyone else interact with it remotely, you
+must offer those users the Corresponding Source of your modified version. The
+/help command carries the source link so that offer is always one command
+away. If you change the code, change SOURCE_URL in src/interactions.js to
+point at your own repository. Leaving it pointed at this repository while
+running modified code is a licence violation, not a shortcut.
+
+Running an unmodified copy for your own community requires nothing from you.
+
+
+TRADEMARKS
+
+This project is not affiliated with, endorsed by, or sponsored by VRChat Inc.
+VRChat is a trademark of VRChat Inc. Discord is a trademark of Discord Inc.
+Neither company endorses this project or is responsible for it.
+
+The licence grants rights to the software only. It grants no right to use the
+"VRChat Legends" name, logo, or other marks to describe or promote a fork. See
+section 7(e) of the licence.
+
+
+VRCHAT API USE
+
+Use of the VRChat API is governed by the VRChat Terms of Service, which sit
+outside this licence and are between you and VRChat Inc.
+
+Run this bot on a dedicated VRChat account, never a personal one, and leave
+the built in rate limiting alone. Every call is globally paced and the member
+list is read in bulk for exactly this reason. Automated access that VRChat
+considers abusive can get the account banned. That risk belongs to whoever is
+operating the bot, not to this project or its contributors.
+
+
+THIRD PARTY DEPENDENCIES
+
+This program uses the following packages, each under its own licence, none of
+which conflict with the AGPL:
+
+  discord.js  Apache-2.0
+  dotenv      BSD-2-Clause
+  js-yaml     MIT
+  otplib      MIT
+  undici      MIT
+
+Their full licence texts ship inside node_modules once dependencies are
+installed.

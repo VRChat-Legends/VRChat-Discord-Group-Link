@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // Logging for VRChat-Discord Group Link. Grown from the VRChat Legends API

@@ -144,8 +144,18 @@ Everything above is adjustable in the `sync` section of `config.yml`: `roster_re
 - `test/simulate-admin-ui.js` exercises the moderation buttons, the link panel, and the profile context menu offline, so nothing is ever changed in VRChat.
 - `test/setup-log-channels-dryrun.js` runs `/setup-log-channels` against a mock guild and restores `config.yml` afterwards.
 
+## License
+
+GNU Affero General Public License v3.0 or later. Full text in [LICENSE](LICENSE), the extra notices in [NOTICE](NOTICE).
+
+Run it for your own community, read it, change it, fork it: all free, and none of that asks anything of you. The one condition that bites is section 13. If you modify the bot and let other people interact with it, you have to offer those people the source of your modified version. That clause is the whole reason this is AGPL and not GPL, because a hosted bot is never "distributed" to the people using it, so a plain GPL would leave a closed source fork perfectly legal.
+
+In practice that means: self host it, no obligations. Fork it privately, no obligations. Run a changed version in someone else's server, publish your changes and point `SOURCE_URL` in [src/interactions.js](src/interactions.js) at your own repo. `/help` shows that link to every user, which is how the offer stays honest.
+
+Not affiliated with VRChat Inc. VRChat is a trademark of VRChat Inc.
+
 ## Credits
 
 Built by VRChat Legends. The VRChat auth and rate limiting layers are battle tested code carried over from the VRChat Legends website backend.
 
-Not affiliated with VRChat Inc. Be a good API citizen: keep the default pacing unless you know exactly what you are doing.
+Be a good API citizen: keep the default pacing unless you know exactly what you are doing.

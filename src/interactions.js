@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // Interaction handling: slash commands, the vrchat_role autocomplete, and
@@ -816,6 +817,10 @@ async function handleSyncStatus(interaction) {
 // /help
 // ---------------------------------------------------------------
 
+// AGPL section 13: anyone interacting with this bot over a network is owed the source of the version they are talking to.
+const SOURCE_URL = 'https://github.com/VRChat-Legends/VRChat-Discord-Group-Link'
+const SOURCE_NOTE = `Free software under the AGPL-3.0. Source code: ${SOURCE_URL}\nIf you are running a changed copy of this bot, you must publish your changes and point this link at them.`
+
 const HELP_MEMBER = [
   ['/link', 'Link your Discord to your VRChat account. You get a short code, put it in your VRChat status, then press Verify.'],
   ['/unlink', 'Break the link and drop the roles the bot gave you.'],
@@ -880,6 +885,7 @@ async function handleHelp(interaction) {
             ['/help', 'This message.'],
           ]), inline: false },
           { name: 'Want the rest?', value: 'Set `simple_mode: false` in config.yml and restart to turn on account linking, profile roles, role sync, and the moderation buttons.', inline: false },
+          { name: 'Source code', value: SOURCE_NOTE, inline: false },
         ],
       }],
     })
@@ -909,6 +915,8 @@ async function handleHelp(interaction) {
     ].join('\n'),
     inline: false,
   })
+
+  fields.push({ name: 'Source code', value: SOURCE_NOTE, inline: false })
 
   await interaction.reply({
     flags: MessageFlags.Ephemeral,

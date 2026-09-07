@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // The whole group member list cached, one VRChat call per 100 members, so the sync can check every linked member every cycle.

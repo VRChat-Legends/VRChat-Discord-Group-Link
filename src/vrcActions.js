@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use strict'
 
 // VRChat moderation actions driven from Discord: ban, unban, and kick.
