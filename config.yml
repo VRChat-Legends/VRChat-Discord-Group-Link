@@ -112,3 +112,23 @@ moderation:
   # anyone with the Administrator permission.
   admin_role_ids: []
   admin_user_ids: []
+
+# Legends Alley role sync: booth owners, managers, and team members get
+# their Discord roles from the Legends Alley website automatically. Turns on
+# when ALLEY_BOT_KEY is set in .env (the backend's BOT_API_KEY). Every role
+# it manages sits together under one divider role, in a fixed order, so the
+# role list stays tidy. Keep my own role above the divider.
+alley:
+  enabled: true
+  # The Legends Alley backend (ALLEY_API_URL in .env overrides this)
+  api_url: "https://alley.vrchatlegends.com"
+  # How often to check for changes, in seconds
+  poll_seconds: 15
+  # How often every member is re-read for a full check, in seconds
+  reconcile_seconds: 600
+  # One role per community as well as Booth Owner / Manager / Team
+  community_roles: true
+  # Name of each community role, {name} is the community
+  community_role_format: "Booth: {name}"
+  # The divider role the block sits under
+  divider_name: "──── Legends Alley ────"

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch --watch-path=./src src/index.js",
-    "test": "node test/requires-resolve.js && node test/sync-two-way.js && node test/roster-and-queue.js && node test/simple-mode.js && node test/simulate-admin-ui.js && node test/setup-log-channels-dryrun.js && node test/setup-misc-roles-dryrun.js"
+    "test": "node test/requires-resolve.js && node test/alley-roles.js && node test/sync-two-way.js && node test/roster-and-queue.js && node test/simple-mode.js && node test/simulate-admin-ui.js && node test/setup-log-channels-dryrun.js && node test/setup-misc-roles-dryrun.js"
   },
   "engines": {
     "node": ">=22.5.0"

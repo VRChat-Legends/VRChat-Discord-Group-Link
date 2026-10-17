@@ -79,4 +79,9 @@ function savedMiscRoles() {
   return saved && typeof saved === 'object' ? { ...saved } : {}
 }
 
-module.exports = { FILE, load, saveChannels, savedChannelAssignments, saveMiscRoles, savedMiscRoles }
+// Legends Alley role ids, so a wiped database adopts the same roles again
+function saveAlleyRoles(ids) {
+  write({ alley_roles: ids && typeof ids === 'object' ? ids : {} })
+}
+
+module.exports = { FILE, load, saveChannels, savedChannelAssignments, saveMiscRoles, savedMiscRoles, saveAlleyRoles }

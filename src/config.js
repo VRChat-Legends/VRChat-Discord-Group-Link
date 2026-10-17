@@ -144,6 +144,19 @@ const config = {
     adminUserIds: idList(yml.moderation?.admin_user_ids),
   },
 
+  // Legends Alley role sync (alley section). Needs ALLEY_BOT_KEY in .env,
+  // the same key the Alley backend has as BOT_API_KEY.
+  alley: {
+    enabled: Boolean(process.env.ALLEY_BOT_KEY) && yml.alley?.enabled !== false,
+    apiUrl: String(process.env.ALLEY_API_URL || yml.alley?.api_url || 'https://alley.vrchatlegends.com').trim(),
+    botKey: process.env.ALLEY_BOT_KEY || '',
+    pollSeconds: Math.max(10, int(yml.alley?.poll_seconds, 15)),
+    reconcileSeconds: Math.max(120, int(yml.alley?.reconcile_seconds, 600)),
+    communityRoles: yml.alley?.community_roles !== false,
+    communityRoleFormat: String(yml.alley?.community_role_format || 'Booth: {name}'),
+    dividerName: String(yml.alley?.divider_name || '──── Legends Alley ────').slice(0, 100),
+  },
+
   // Simple mode: a plain log relay. No account linking, no role sync, no
   // buttons on anything, no reasons or case threads. The bot only posts
   // group logs, group posts, and join requests as read-only messages.

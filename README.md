@@ -123,6 +123,17 @@ Tracker channels rename at most once every 6 minutes per channel because Discord
 
 Everything above is adjustable in the `sync` section of `config.yml`: `roster_refresh_seconds`, `roster_max_members`, `profiles_per_cycle`, `profile_ttl_hours`, `event_drain_seconds`, `conflict_winner`, and `grant_on_first_sight`. The defaults suit groups up to about 25,000 members. Run `/sync-status` to see what the engine is actually doing before changing any of them.
 
+## Legends Alley role sync
+
+Optional, for the Legends Alley event. Set `ALLEY_BOT_KEY` in `.env` to the Alley backend's `BOT_API_KEY` and the bot keeps these roles in step with the website:
+
+- **Booth Owner**, **Booth Manager**, and **Booth Team** for everyone running an active community.
+- **Booth: <community>**, one per community, held by its owner, managers, and team (turn off with `alley.community_roles`).
+
+A person on more than one community simply gets every role that applies. A community the event staff have switched off grants nothing until it is switched back on; its role is kept, empty, so re-enabling it needs no setup. Roles for deleted communities are removed, and renamed communities have their role renamed.
+
+Every one of these roles sits together under a single divider role (`──── Legends Alley ────`), Owner, Manager, Team, then the communities alphabetically, and the bot puts them back in that order if anything drifts. Keep the bot's own role above the divider. Changes on the website land within `alley.poll_seconds` (default 15), and every member is re-checked every `alley.reconcile_seconds` (default 600). Only roles in the block are ever added or removed.
+
 ## Troubleshooting
 
 - **"You're not allowed to change a member of the same or higher rank" (HTTP 403)**: VRChat only lets an account edit members **below** its own highest group role; the bot having Discord admin changes nothing. In the VRChat group settings, move the bot account's role above the roles of everyone it should manage and give that role **Manage Group Member Data**. The bot pauses role edits for an affected member for 6 hours and posts one alert instead of spamming. The same rule applies to the ban and kick buttons.
